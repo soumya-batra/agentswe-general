@@ -1,4 +1,5 @@
 import argparse
+
 import uvicorn
 
 from a2a.server.apps import A2AStarletteApplication
@@ -15,31 +16,51 @@ from executor import Executor
 
 def main():
     parser = argparse.ArgumentParser(description="Run the A2A agent.")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the server")
-    parser.add_argument("--port", type=int, default=9009, help="Port to bind the server")
-    parser.add_argument("--card-url", type=str, help="URL to advertise in the agent card")
+    parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=9010)
+    parser.add_argument("--card-url", type=str)
     args = parser.parse_args()
 
-    # Fill in your agent card
-    # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
-    
     skill = AgentSkill(
-        id="",
-        name="",
-        description="",
-        tags=[],
-        examples=[]
+        id="general_purpose",
+        name="General-purpose agent",
+        description=(
+            "Handles tasks across many AgentBeats benchmark categories: "
+            "Q&A, web research, multi-turn dialogue, coding (via a "
+            "Docker-mounted workspace), terminal-driven tasks, and "
+            "policy/decision tasks."
+        ),
+        tags=[
+            "general",
+            "coding",
+            "research",
+            "qa",
+            "dialogue",
+            "policy",
+            "agentbeats",
+        ],
+        examples=[
+            "Answer a question grounded in a public document",
+            "Fix a bug in a Docker-shipped repository and return a diff",
+            "Solve a Linux terminal task via shell commands",
+            "Make a policy-compliant decision for a given scenario",
+        ],
     )
 
     agent_card = AgentCard(
-        name="",
-        description="",
+        name="agentswe-general",
+        description=(
+            "General-purpose purple agent for AgentBeats Sprint 4. "
+            "Dispatches incoming A2A messages by FORMAT (not benchmark "
+            "name) to handlers that share a single system prompt and "
+            "toolset, differing only in I/O translation."
+        ),
         url=args.card_url or f"http://{args.host}:{args.port}/",
-        version='1.0.0',
-        default_input_modes=['text'],
-        default_output_modes=['text'],
+        version="0.1.0",
+        default_input_modes=["text", "application/json"],
+        default_output_modes=["text", "application/json"],
         capabilities=AgentCapabilities(streaming=True),
-        skills=[skill]
+        skills=[skill],
     )
 
     request_handler = DefaultRequestHandler(
@@ -53,5 +74,5 @@ def main():
     uvicorn.run(server.build(), host=args.host, port=args.port)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

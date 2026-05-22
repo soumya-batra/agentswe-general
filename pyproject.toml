@@ -1,12 +1,14 @@
 [project]
-name = "agent-template"
+name = "agentswe-general"
 version = "0.1.0"
-description = "A template for A2A agents"
+description = "General-purpose purple agent for AgentBeats Sprint 4"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "a2a-sdk[http-server]>=0.3.20",
     "uvicorn>=0.38.0",
+    "openai>=1.55.0",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
