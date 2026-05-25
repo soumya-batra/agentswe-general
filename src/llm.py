@@ -32,3 +32,20 @@ def tools_enabled() -> bool:
     """
     raw = os.environ.get("TOOLS_ENABLED", "true").strip().lower()
     return raw not in ("0", "false", "no", "off", "")
+
+
+def json_output() -> bool:
+    """Enforce JSON-object output on the LLM via OpenAI's response_format.
+
+    Set via Amber config per deployment. Turn ON for benchmarks whose
+    green agent parses our response as JSON (e.g. tau2-bench expects
+    {"name": "<tool>", "arguments": {...}}). Off by default — most
+    benchmarks want natural-language responses.
+
+    Note: the OpenAI API requires the literal word "JSON" to appear
+    somewhere in the prompt when this is enabled, otherwise it 400s.
+    For benchmarks where this flag is on, the green's policy text is
+    expected to mention JSON.
+    """
+    raw = os.environ.get("JSON_OUTPUT", "false").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")

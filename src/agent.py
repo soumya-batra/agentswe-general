@@ -29,7 +29,7 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import DataPart, Message, Part, TaskState, TextPart
 from a2a.utils import new_agent_text_message
 
-from llm import make_client, model_name, tools_enabled
+from llm import json_output, make_client, model_name, tools_enabled
 from messenger import Messenger
 from tools import (
     GENERIC_TOOL_SCHEMAS,
@@ -263,6 +263,8 @@ class Agent:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        if json_output():
+            kwargs["response_format"] = {"type": "json_object"}
 
         resp = await _chat_completions_with_retry(self.client, **kwargs)
         choice = resp.choices[0]
@@ -500,6 +502,8 @@ class Agent:
                 # Discourage parallel calls so a paused call doesn't
                 # leave siblings without tool results in history.
                 kwargs["parallel_tool_calls"] = False
+            if json_output():
+                kwargs["response_format"] = {"type": "json_object"}
 
             resp = await _chat_completions_with_retry(self.client, **kwargs)
             msg = resp.choices[0].message

@@ -114,8 +114,39 @@ SHELL_EXEC = {
     },
 }
 
+PYTHON_EXEC = {
+    "type": "function",
+    "function": {
+        "name": "python_exec",
+        "description": (
+            "Run a Python 3 snippet for reliable computation: math, "
+            "arithmetic, statistics, parsing, string manipulation. "
+            "USE THIS INSTEAD OF computing in your head for any "
+            "non-trivial calculation — models are unreliable at "
+            "arithmetic but Python is exact. Anything printed to "
+            "stdout is returned. Python stdlib is available (math, "
+            "statistics, decimal, fractions, json, re, datetime, "
+            "collections, itertools, etc.); third-party packages are "
+            "not."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python source. Print final results.",
+                },
+                "timeout_s": {"type": "integer"},
+            },
+            "required": ["code"],
+        },
+    },
+}
 
-GENERIC_TOOL_SCHEMAS = [WEB_SEARCH, WEB_FETCH, SHELL_EXEC, READ_FILE, WRITE_FILE]
+
+GENERIC_TOOL_SCHEMAS = [
+    WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE
+]
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +419,32 @@ async def web_fetch(url: str) -> str:
 # Tool dispatcher
 
 
+async def python_exec(code: str, timeout_s: int = 30) -> str:
+    """Run a Python snippet in the agent's own interpreter.
+
+    Independent of any Workdir — this is a computation primitive, not
+    a file-manipulation tool. The model can use it for reliable math
+    even when no shell environment is available.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "-c", code,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_s
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        return _format_result(-1, "", f"timed out after {timeout_s}s")
+    return _format_result(
+        proc.returncode or 0,
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+    )
+
+
 async def dispatch(
     name: str,
     arguments: dict[str, Any],
@@ -398,6 +455,8 @@ async def dispatch(
             return await web_search(**arguments)
         if name == "web_fetch":
             return await web_fetch(**arguments)
+        if name == "python_exec":
+            return await python_exec(**arguments)
 
         if workdir is None:
             return f"[error: {name} requires a workdir; none available]"

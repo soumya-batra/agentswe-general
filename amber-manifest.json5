@@ -25,6 +25,12 @@
       // whose green agent already injects task-specific tools into the
       // system prompt as inline text (e.g. tau2-bench).
       tools_enabled: { type: "boolean", default: false },
+
+      // Force the LLM to emit a JSON object. Turn ON for benchmarks
+      // whose green agent parses our response as JSON, e.g. tau2-bench
+      // expects {"name": "<tool>", "arguments": {...}}. The green's
+      // policy text must mention "JSON" or the API will 400.
+      json_output: { type: "boolean", default: false },
     },
     required: ["openrouter_api_key"],
     additionalProperties: false,
@@ -44,6 +50,7 @@
       MODEL_NAME: "${config.model_name}",
       TAVILY_API_KEY: "${config.tavily_api_key}",
       TOOLS_ENABLED: "${config.tools_enabled}",
+      JSON_OUTPUT: "${config.json_output}",
     },
 
     mounts: [
