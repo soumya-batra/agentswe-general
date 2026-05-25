@@ -19,10 +19,12 @@ lookups. We don't do that.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from typing import Any
 
+import openai
 from a2a.server.tasks import TaskUpdater
 from a2a.types import DataPart, Message, Part, TaskState, TextPart
 from a2a.utils import new_agent_text_message
@@ -36,6 +38,28 @@ from tools import (
     Workdir,
     dispatch as tool_dispatch,
 )
+
+
+async def _chat_completions_with_retry(client, *, max_attempts: int = 4, **kwargs):
+    """OpenRouter sometimes routes to providers that 5xx or return a
+    non-JSON body (HTML error page → JSONDecodeError in the SDK). One
+    bad pick shouldn't kill the whole task.
+    """
+    delay = 1.0
+    for attempt in range(max_attempts):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except (
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.RateLimitError,
+            openai.InternalServerError,
+            json.JSONDecodeError,
+        ):
+            if attempt == max_attempts - 1:
+                raise
+            await asyncio.sleep(delay)
+            delay *= 2
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +128,11 @@ Guidelines:
   knowledge and the task's own instructions/tools.
 - Be concise. Stop calling tools once you have enough information.
 - For multi-turn dialogues, treat each incoming message as the next turn.
+- Each shell command must complete quickly (often within 30 seconds in
+  sandboxed environments). For long-running operations (builds, large
+  recursive searches, package installs), narrow the scope, set explicit
+  timeouts (`timeout 25 ...`), or run in the background (`nohup ... &`)
+  and check results in a later step.
 """
 
 
@@ -214,7 +243,7 @@ class Agent:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        resp = await self.client.chat.completions.create(**kwargs)
+        resp = await _chat_completions_with_retry(self.client, **kwargs)
         choice = resp.choices[0]
         msg = choice.message
 
@@ -451,7 +480,7 @@ class Agent:
                 # leave siblings without tool results in history.
                 kwargs["parallel_tool_calls"] = False
 
-            resp = await self.client.chat.completions.create(**kwargs)
+            resp = await _chat_completions_with_retry(self.client, **kwargs)
             msg = resp.choices[0].message
 
             assistant_entry: dict[str, Any] = {
