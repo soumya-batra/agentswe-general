@@ -40,6 +40,27 @@ from tools import (
 )
 
 
+_TOOL_OUTPUT_CHAR_BUDGET = 20_000
+
+
+def _truncate_tool_output(text: str, budget: int = _TOOL_OUTPUT_CHAR_BUDGET) -> str:
+    """Cap a single tool result so one oversized stdout (e.g. cat of a
+    build log, find / on a huge tree) doesn't blow past the model's
+    context window. Keeps a small head and a larger tail because exit
+    codes, errors, and final output usually appear at the bottom.
+    """
+    if len(text) <= budget:
+        return text
+    head_keep = budget // 4
+    tail_keep = budget - head_keep
+    dropped = len(text) - budget
+    return (
+        text[:head_keep]
+        + f"\n\n[... truncated {dropped:,} chars of tool output ...]\n\n"
+        + text[-tail_keep:]
+    )
+
+
 async def _chat_completions_with_retry(client, *, max_attempts: int = 4, **kwargs):
     """OpenRouter sometimes routes to providers that 5xx or return a
     non-JSON body (HTML error page → JSONDecodeError in the SDK). One
@@ -291,7 +312,7 @@ class Agent:
             instruction = payload.get("instruction") or raw_text
             self.history.append({"role": "user", "content": instruction})
         elif kind == "exec_result":
-            result_text = (
+            result_text = _truncate_tool_output(
                 f"exit_code: {payload.get('exit_code')}\n"
                 f"stdout:\n{payload.get('stdout', '')}\n"
                 f"stderr:\n{payload.get('stderr', '')}"
@@ -553,7 +574,7 @@ class Agent:
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": result,
+                        "content": _truncate_tool_output(result),
                     }
                 )
 
