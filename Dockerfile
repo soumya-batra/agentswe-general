@@ -11,11 +11,11 @@ RUN apt-get update \
 # already broken by the host docker socket mount itself.
 WORKDIR /root
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src src
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync
+    uv sync --frozen
 
 ENTRYPOINT ["uv", "run", "src/server.py"]
 CMD ["--host", "0.0.0.0", "--port", "9010"]
