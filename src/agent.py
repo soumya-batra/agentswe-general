@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import tempfile
 from typing import Any
 
@@ -370,12 +371,16 @@ class Agent:
 
         tools = GENERIC_TOOL_SCHEMAS if tools_enabled() else []
 
+        # Both shell_exec AND python_exec must run inside the benchmark's
+        # sandbox, not in our local agent container — so we pause on both
+        # and translate python_exec into `python3 -c <code>` before
+        # emitting the exec_request.
         final_text, paused = await self._chat_loop(
             tools=tools,
             updater=updater,
             workdir=self.workdir(),
             max_steps=8,
-            pause_on={"shell_exec"},
+            pause_on={"shell_exec", "python_exec"},
         )
 
         if paused:
@@ -385,11 +390,15 @@ class Agent:
             except json.JSONDecodeError:
                 args = {}
             self.pending_protocol_tool_id = tc["id"]
+            if tc["name"] == "python_exec":
+                command = f"python3 -c {shlex.quote(args.get('code', ''))}"
+            else:
+                command = args.get("command", "")
             await self._send_protocol_message(
                 updater,
                 {
                     "kind": "exec_request",
-                    "command": args.get("command", ""),
+                    "command": command,
                 },
             )
         else:

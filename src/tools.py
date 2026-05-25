@@ -100,13 +100,28 @@ SHELL_EXEC = {
     "function": {
         "name": "shell_exec",
         "description": (
-            "Run a shell command in the working environment. Returns "
-            "stdout, stderr, and exit code."
+            "Run a shell command in the working environment. Use this "
+            "for filesystem operations, running programs, package "
+            "managers, version control, system inspection, or any task "
+            "that needs the shell/bash interpreter. The command is "
+            "executed by /bin/sh, so shell features like pipes, "
+            "redirection, globbing, and environment variables work. "
+            "Returns stdout, stderr, and exit code. DO NOT use this "
+            "for pure arithmetic or data manipulation — call "
+            "`python_exec` for those, which is more reliable than "
+            "constructing `python3 -c ...` commands."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string"},
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "The shell command to run, e.g. "
+                        "'ls -la /tmp', 'grep -r foo src/', "
+                        "'cat README.md', 'git diff'."
+                    ),
+                },
                 "timeout_s": {"type": "integer"},
             },
             "required": ["command"],
@@ -119,22 +134,27 @@ PYTHON_EXEC = {
     "function": {
         "name": "python_exec",
         "description": (
-            "Run a Python 3 snippet for reliable computation: math, "
-            "arithmetic, statistics, parsing, string manipulation. "
+            "Run a Python 3 snippet for PURE COMPUTATION: arithmetic, "
+            "math, statistics, parsing, string manipulation, regex, "
+            "date math, list/dict transformations, JSON parsing. "
             "USE THIS INSTEAD OF computing in your head for any "
             "non-trivial calculation — models are unreliable at "
             "arithmetic but Python is exact. Anything printed to "
             "stdout is returned. Python stdlib is available (math, "
             "statistics, decimal, fractions, json, re, datetime, "
-            "collections, itertools, etc.); third-party packages are "
-            "not."
+            "collections, itertools, etc.); third-party packages and "
+            "filesystem operations are NOT — use `shell_exec` if you "
+            "need to read/write files or run external programs."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python source. Print final results.",
+                    "description": (
+                        "Python source code. Use print(...) to return "
+                        "results — anything not printed is discarded."
+                    ),
                 },
                 "timeout_s": {"type": "integer"},
             },
