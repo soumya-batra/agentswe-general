@@ -255,6 +255,29 @@ class Agent:
         """
         messages = payload.get("messages") or []
         tools = payload.get("tools") or []
+        benchmark_context = payload.get("benchmark_context") or []
+
+        # If the green sent benchmark_context (e.g. pi-bench's policy /
+        # task notes), prepend it as a system message so the model has
+        # the operating context the benchmark expects. Strip any
+        # incoming system messages first to avoid duplication.
+        if benchmark_context:
+            ctx_blocks = []
+            for node in benchmark_context:
+                if not isinstance(node, dict):
+                    continue
+                content = str(node.get("content", "")).strip()
+                if not content:
+                    continue
+                kind = str(node.get("kind", "context")).strip() or "context"
+                title = kind.replace("_", " ").title()
+                ctx_blocks.append(f"### {title}\n{content}")
+            if ctx_blocks:
+                system_content = "## Benchmark Context\n" + "\n\n".join(ctx_blocks)
+                messages = [
+                    {"role": "system", "content": system_content},
+                    *(m for m in messages if isinstance(m, dict) and m.get("role") != "system"),
+                ]
 
         kwargs: dict[str, Any] = {
             "model": model_name(),
@@ -265,24 +288,25 @@ class Agent:
             kwargs["tool_choice"] = "auto"
         if json_output():
             kwargs["response_format"] = {"type": "json_object"}
+        # pi-bench passes a seed for reproducibility; forward when present.
+        if "seed" in payload and payload["seed"] is not None:
+            kwargs["seed"] = payload["seed"]
 
         resp = await _chat_completions_with_retry(self.client, **kwargs)
         choice = resp.choices[0]
         msg = choice.message
 
-        # Build the response payload pi-bench's purple_adapter understands:
-        #   - DataPart with {"tool_calls": [...]} if the model called tools
-        #   - DataPart with {"content": "..."} for plain replies
+        # Build the response payload pi-bench's purple_adapter understands.
+        # Its _part_to_pi_msg expects tool_calls as a flat list of
+        # {id, name, arguments} (NOT the OpenAI SDK's nested
+        # {id, type, function: {name, arguments}} shape).
         data: dict[str, Any] = {}
         if msg.tool_calls:
             data["tool_calls"] = [
                 {
                     "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
                 }
                 for tc in msg.tool_calls
             ]
