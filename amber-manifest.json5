@@ -1,10 +1,9 @@
 {
   manifest_version: "0.1.0",
 
-  // Required so we can mount the host Docker socket — needed by the
-  // SWE-bench handler, which pulls the green agent's proprietary repo
-  // image and exec's into it to read files and apply edits.
-  experimental_features: ["docker"],
+  // Docker support is enabled via `slots.docker` + the framework.docker
+  // mount below. Some amber-cli versions (e.g. v0 on tau2's leaderboard)
+  // reject an `experimental_features` field, so we don't declare one.
 
   config_schema: {
     type: "object",
