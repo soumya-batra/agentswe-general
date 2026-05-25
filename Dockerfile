@@ -6,14 +6,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-RUN adduser --disabled-password --gecos "" agent
-USER agent
-WORKDIR /home/agent
+# Run as root so Amber's framework.docker mount can bind a Unix socket
+# at /var/run/docker.sock inside the container. Container isolation is
+# already broken by the host docker socket mount itself.
+WORKDIR /root
 
 COPY pyproject.toml README.md ./
 COPY src src
 
-RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1000 \
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync
 
 ENTRYPOINT ["uv", "run", "src/server.py"]
