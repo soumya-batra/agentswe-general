@@ -35,9 +35,13 @@
     additionalProperties: false,
   },
 
-  slots: {
-    docker: { kind: "docker", optional: true },
-  },
+  // UNCOMMENT before submitting to SWE-bench or terminal-bench (their
+  // newer amber-cli supports docker slots). Leave commented for tau2
+  // and any leaderboard running amber-cli v0, which doesn't know the
+  // `docker` slot kind.
+  // slots: {
+  //   docker: { kind: "docker", optional: true },
+  // },
 
   program: {
     image: "ghcr.io/soumya-batra/agentswe-general:latest",
@@ -52,9 +56,11 @@
       JSON_OUTPUT: "${config.json_output}",
     },
 
-    mounts: [
-      { path: "/var/run/docker.sock", from: "framework.docker" },
-    ],
+    // UNCOMMENT alongside the slots.docker declaration above when
+    // submitting to SWE-bench / terminal-bench.
+    // mounts: [
+    //   { path: "/var/run/docker.sock", from: "framework.docker" },
+    // ],
 
     network: {
       endpoints: [
