@@ -28,7 +28,7 @@
   },
 
   slots: {
-    docker: { kind: "docker" },
+    docker: { kind: "docker", optional: true },
   },
 
   program: {
