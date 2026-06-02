@@ -35,11 +35,13 @@ from llm import (
     make_client,
     model_name,
     reasoning_enabled,
+    retrieval_enabled,
     tools_enabled,
 )
 from messenger import Messenger
 from tools import (
     GENERIC_TOOL_SCHEMAS,
+    RETRIEVE_DOCUMENTS,
     DockerWorkdir,
     LocalWorkdir,
     Workdir,
@@ -230,13 +232,48 @@ class Agent:
         else:
             user_content = raw_text or "(empty message)"
 
+        # When retrieval is enabled (e.g. OfficeQA deployment), pre-retrieve
+        # top-k passages for this turn's question and prepend them as a
+        # system message — the model gets the corpus context up front
+        # instead of having to decide whether to retrieve. It can STILL
+        # call `retrieve_documents` again with a refined query if the
+        # initial set isn't specific enough.
+        if retrieval_enabled():
+            try:
+                from tools import retrieve_documents as _retrieve
+                query_text = raw_text or user_content
+                retrieved = await _retrieve(query=query_text)
+                self.history.append({
+                    "role": "system",
+                    "content": (
+                        "# Retrieved corpus context\n"
+                        "The following passages were retrieved from the "
+                        "baked-in corpus based on the user's question. "
+                        "Use them as your primary source. You may call "
+                        "`retrieve_documents` again with a refined query "
+                        "if these aren't specific enough.\n\n"
+                        + retrieved
+                    ),
+                })
+            except Exception as e:  # noqa: BLE001
+                # Never let a retrieval failure kill the whole task.
+                print(
+                    f"[retrieval] pre-retrieve failed: "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+
         self.history.append({"role": "user", "content": user_content})
 
         # When TOOLS_ENABLED=off (e.g. tau2 deployment), the task's own
         # prompt has already given the model whatever tool surface it
         # needs as inline text; we must not expose our own OpenAI-format
         # tools or the model will mix surfaces.
-        tools = GENERIC_TOOL_SCHEMAS if tools_enabled() else []
+        tools = list(GENERIC_TOOL_SCHEMAS) if tools_enabled() else []
+        # Even when generic tools are off, expose retrieve_documents
+        # when the corpus is baked in — it's the right tool for the job.
+        if retrieval_enabled():
+            tools.append(RETRIEVE_DOCUMENTS)
 
         final_text, paused = await self._chat_loop(
             tools=tools,

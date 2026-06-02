@@ -164,6 +164,44 @@ PYTHON_EXEC = {
 }
 
 
+RETRIEVE_DOCUMENTS = {
+    "type": "function",
+    "function": {
+        "name": "retrieve_documents",
+        "description": (
+            "Search the deployment's baked-in document corpus for "
+            "passages relevant to a query. Combines semantic (FAISS) "
+            "and keyword (BM25) search with reciprocal-rank fusion. "
+            "The model does NOT have the corpus memorized; ALWAYS use "
+            "this to ground answers in source text. The pre-retrieved "
+            "context you already have was retrieved for the user's "
+            "original question — call this again with a more specific "
+            "query (e.g. narrowed years, named entities, exact dollar "
+            "figures) if the initial passages aren't precise enough. "
+            "Returns the top-k passages with their source files."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The question or topic to search for. Include "
+                        "specific terms, years, amounts, table names — "
+                        "anything that pins down the passage."
+                    ),
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Number of passages to return (default 25).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 GENERIC_TOOL_SCHEMAS = [
     WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE
 ]
@@ -465,6 +503,72 @@ async def python_exec(code: str, timeout_s: int = 30) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# OfficeQA corpus retrieval (FAISS + BM25 + year-era filtering).
+# Lazy singleton — only instantiated on first call so non-OfficeQA
+# deployments don't pay the (heavy) load cost.
+
+_retriever_singleton = None
+
+
+def _get_retriever():
+    """Lazy-construct the FaissRetriever from baked-in index + corpus."""
+    global _retriever_singleton
+    if _retriever_singleton is not None:
+        return _retriever_singleton
+
+    import sys
+    from pathlib import Path
+
+    # The retrieval modules use bare imports (`from chunker import ...`),
+    # so add the package dir to sys.path before importing.
+    pkg_dir = Path(__file__).resolve().parent / "officeqa_retrieval"
+    if str(pkg_dir) not in sys.path:
+        sys.path.insert(0, str(pkg_dir))
+
+    from faiss_retriever import FaissRetriever  # noqa: E402
+
+    corpus_dir = Path(os.environ.get("CORPUS_DIR", "/app/corpus"))
+    index_dir = Path(os.environ.get("FAISS_INDEX_DIR", "/app/faiss_index"))
+    top_k = int(os.environ.get("RETRIEVAL_TOP_K", "25"))
+
+    _retriever_singleton = FaissRetriever(corpus_dir, index_dir, top_k=top_k)
+    return _retriever_singleton
+
+
+def _format_retrieved(contexts) -> str:
+    """Render retrieved chunks as a single string for prompt injection."""
+    if not contexts:
+        return "[no passages retrieved]"
+    blocks = []
+    for i, ctx in enumerate(contexts, 1):
+        source = getattr(ctx, "source", "(unknown source)")
+        content = getattr(ctx, "content", "")
+        blocks.append(f"## Passage {i} — {source}\n{content}")
+    return "\n\n".join(blocks)
+
+
+async def retrieve_documents(query: str, k: int | None = None) -> str:
+    """Search the baked-in OfficeQA corpus and return top-k passages.
+
+    Runs the synchronous FaissRetriever in a thread so the event loop
+    isn't blocked by FAISS / BM25 / network embedding calls.
+    """
+    def _sync():
+        retriever = _get_retriever()
+        # Override top_k if caller specified one for this query.
+        original = retriever._top_k
+        try:
+            if k is not None:
+                retriever._top_k = int(k)
+            return retriever.retrieve(query)
+        finally:
+            retriever._top_k = original
+
+    contexts = await asyncio.to_thread(_sync)
+    return _format_retrieved(contexts)
+
+
 async def dispatch(
     name: str,
     arguments: dict[str, Any],
@@ -477,6 +581,8 @@ async def dispatch(
             return await web_fetch(**arguments)
         if name == "python_exec":
             return await python_exec(**arguments)
+        if name == "retrieve_documents":
+            return await retrieve_documents(**arguments)
 
         if workdir is None:
             return f"[error: {name} requires a workdir; none available]"

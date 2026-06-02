@@ -34,6 +34,17 @@ def tools_enabled() -> bool:
     return raw not in ("0", "false", "no", "off", "")
 
 
+def retrieval_enabled() -> bool:
+    """Whether to expose the `retrieve_documents` tool (OfficeQA corpus).
+
+    The tool is backed by a baked-in FAISS + BM25 index over the
+    Treasury Bulletin corpus. Turn ON for OfficeQA; leave OFF elsewhere
+    so other benchmarks don't see an irrelevant tool in their schema.
+    """
+    raw = os.environ.get("RETRIEVAL_ENABLED", "false").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
+
+
 def reasoning_enabled() -> bool:
     """Whether to let the model use its hidden reasoning channel.
 

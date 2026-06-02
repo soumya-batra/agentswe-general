@@ -1,3 +1,9 @@
+# Stage 1: pull the baked-in OfficeQA FAISS index + Treasury Bulletin
+# corpus from our existing specialized agent image. Multi-GB blobs that
+# can't be reliably fetched at runtime — bake them into the image.
+FROM --platform=linux/amd64 ghcr.io/soumya-batra/officeqa-agent:latest AS officeqa-data
+
+# Stage 2: the real agent image.
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm
 
 # Docker CLI is needed by the SWE-bench handler. The daemon is the
@@ -5,6 +11,11 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm
 RUN apt-get update \
     && apt-get install -y --no-install-recommends docker.io \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy the OfficeQA corpus + FAISS index. Paths match what the
+# manifest sets via CORPUS_DIR and FAISS_INDEX_DIR.
+COPY --from=officeqa-data /app/corpus /app/corpus
+COPY --from=officeqa-data /app/faiss_index /app/faiss_index
 
 # Run as root so Amber's framework.docker mount can bind a Unix socket
 # at /var/run/docker.sock inside the container. Container isolation is

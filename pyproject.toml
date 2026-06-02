@@ -9,6 +9,12 @@ dependencies = [
     "uvicorn>=0.38.0",
     "openai>=1.55.0",
     "httpx>=0.28.1",
+    # OfficeQA retrieval (loaded lazily; only used when retrieval_enabled=true).
+    "faiss-cpu>=1.7.4",
+    "numpy>=1.26.0",
+    "bm25s>=0.2.0",
+    "PyStemmer>=2.2.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.optional-dependencies]
