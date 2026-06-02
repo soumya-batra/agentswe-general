@@ -101,6 +101,30 @@ def main():
         agent_card=agent_card,
         http_handler=request_handler,
     )
+
+    # Pre-warm the retriever BEFORE accepting traffic. mmaping the
+    # 2.3 GB FAISS index + loading BM25 takes ~30-60s on first call;
+    # if that happens inside the request path, the gateway times out
+    # (502 Bad Gateway). Eager load moves the cost out of the request.
+    if retrieval_enabled():
+        print("[startup] pre-warming retriever ...", flush=True)
+        import time as _time
+        _t0 = _time.monotonic()
+        try:
+            from tools import _get_retriever
+            _get_retriever()
+            print(
+                f"[startup] retriever ready in "
+                f"{_time.monotonic() - _t0:.1f}s",
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[startup] retriever pre-warm FAILED: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
     uvicorn.run(server.build(), host=args.host, port=args.port)
 
 
