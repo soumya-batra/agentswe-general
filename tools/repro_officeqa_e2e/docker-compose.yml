@@ -1,0 +1,64 @@
+services:
+  judge:
+    container_name: officeqa-judge-repro
+    build:
+      context: /Users/soumyabatra/Documents/agentbeats/officeqa_agentbeats
+      dockerfile: /Users/soumyabatra/Documents/agentbeats/agentswe-general/tools/repro_officeqa_e2e/Dockerfile.judge-patched
+    command: ["--host", "0.0.0.0", "--port", "9009", "--card-url", "http://judge:9009"]
+    ports: ["9009:9009"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9009/.well-known/agent-card.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      officeqa_agent:
+        condition: service_healthy
+    networks: [agentnet]
+
+  officeqa_agent:
+    container_name: officeqa-agent-repro
+    image: ghcr.io/soumya-batra/agentswe-general:latest
+    command: ["--host", "0.0.0.0", "--port", "9010", "--card-url", "http://officeqa_agent:9010"]
+    ports: ["9011:9010"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      MODEL_NAME: z-ai/glm-5
+      TOOLS_ENABLED: "true"
+      JSON_OUTPUT: "false"
+      REASONING_ENABLED: "true"
+      RETRIEVAL_ENABLED: "true"
+      RETRIEVAL_TOP_K: "25"
+      CORPUS_DIR: /app/corpus
+      FAISS_INDEX_DIR: /app/faiss_index
+      TAVILY_API_KEY: ""
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9010/.well-known/agent-card.json\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 60s
+    networks: [agentnet]
+
+  agentbeats-client:
+    image: ghcr.io/agentbeats/agentbeats-client:v1.0.0
+    container_name: officeqa-client-repro
+    volumes:
+      - ./scenario.toml:/app/scenario.toml
+      - ./output:/app/output
+    command: ["scenario.toml", "output/results.json"]
+    depends_on:
+      judge:
+        condition: service_healthy
+      officeqa_agent:
+        condition: service_healthy
+    networks: [agentnet]
+
+networks:
+  agentnet:
+    driver: bridge
