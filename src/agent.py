@@ -268,6 +268,17 @@ class Agent:
                         "Use them as your primary source. You may call "
                         "`retrieve_documents` again with a refined query "
                         "if these aren't specific enough.\n\n"
+                        "# Output format\n"
+                        "The judge for this benchmark extracts your final "
+                        "answer from `<FINAL_ANSWER>...</FINAL_ANSWER>` "
+                        "tags via regex. Your response MUST end with the "
+                        "answer wrapped in those exact tags, e.g. "
+                        "`<FINAL_ANSWER>42</FINAL_ANSWER>` or "
+                        "`<FINAL_ANSWER>-118255.5</FINAL_ANSWER>`. "
+                        "Without the tags the answer is marked WRONG "
+                        "even if it is numerically correct. Show your "
+                        "reasoning before the tag; only the contents "
+                        "between the tags are scored.\n\n"
                         + retrieved
                     ),
                 })
