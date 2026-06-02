@@ -126,7 +126,7 @@ def extract_payload(message: Message) -> tuple[Any, str]:
     return None, text
 
 
-def classify(payload: Any) -> str:
+def classify(payload: Any, raw_text: str = "") -> str:
     if isinstance(payload, dict):
         if payload.get("protocol") == "terminal-bench-shell-v1":
             return "terminal_shell"
@@ -138,6 +138,15 @@ def classify(payload: Any) -> str:
             return "swe_bench"
         if isinstance(payload.get("messages"), list):
             return "openai_passthrough"
+        # CAR-bench: green sends a DataPart containing tool schemas or
+        # tool_results, paired with a TextPart for the user utterance.
+        # Distinguish from pi-bench by the absence of a `messages` field.
+        if "tools" in payload or "tool_results" in payload:
+            return "car_bench"
+    # First-turn CAR-bench can ALSO arrive as plain text containing the
+    # "System:\n...\n\nUser:" marker when the DataPart is empty.
+    if "System:" in raw_text and "\n\nUser:" in raw_text:
+        return "car_bench"
     return "generic"
 
 
@@ -184,6 +193,11 @@ class Agent:
         # When a protocol handler emits a tool call as A2A and waits for
         # the next turn to bring the result, the tool_call_id sits here.
         self.pending_protocol_tool_id: str | None = None
+        # CAR-bench state: tool schemas from the green (set on first
+        # turn) and the previous turn's emitted tool_calls so we can
+        # map incoming tool_results back to their tool_call_id by name.
+        self._car_bench_tools: list[dict[str, Any]] | None = None
+        self._car_bench_pending_tool_calls: list[dict[str, Any]] | None = None
 
     def workdir(self) -> Workdir:
         if self._workdir is None:
@@ -195,7 +209,7 @@ class Agent:
 
         # Sticky handler: classify on first message, keep using it.
         if self.handler is None:
-            self.handler = classify(payload)
+            self.handler = classify(payload, raw_text)
 
         await updater.update_status(
             TaskState.working,
@@ -208,6 +222,8 @@ class Agent:
             await self._terminal_shell(payload, raw_text, updater)
         elif self.handler == "swe_bench":
             await self._swe_bench(payload, updater)
+        elif self.handler == "car_bench":
+            await self._car_bench(payload, raw_text, updater)
         else:
             await self._generic(payload, raw_text, updater)
 
@@ -363,6 +379,159 @@ class Agent:
             parts=[Part(root=DataPart(data=data))],
             name="openai_response",
         )
+
+    async def _car_bench(
+        self,
+        payload: Any,
+        raw_text: str,
+        updater: TaskUpdater,
+    ) -> None:
+        """CAR-bench protocol (in-car voice assistant).
+
+        Per turn the green sends a mix of TextPart and DataPart:
+        - TextPart on first turn: 'System:\\n<policy>\\n\\nUser:\\n<utterance>'
+        - TextPart on later turns: just the new user utterance
+        - DataPart on first turn: {"tools": [...openai-style schemas...]}
+        - DataPart on later turns: {"tool_results": [{"tool_name", "content"}]}
+
+        We reply with a list of Parts:
+        - TextPart with content (for user-facing replies)
+        - DataPart with {"tool_calls": [{"tool_name", "arguments": {...}}]}
+          (flat shape — CAR-bench identifies by NAME, not id)
+
+        State across turns lives on self: history (OpenAI-format),
+        _car_bench_tools (cached schemas), and _car_bench_pending_tool_calls
+        (so we can map next turn's tool_results back to ids by name).
+        Mirrors the reference baseline at
+        CAR-bench/car-bench-agentbeats/src/purple_car_bench_agent.
+        """
+        # ── parse incoming TextPart ─────────────────────────────────
+        user_text: str | None = None
+        if raw_text:
+            if "System:" in raw_text and "\n\nUser:" in raw_text:
+                sys_part, user_part = raw_text.split("\n\nUser:", 1)
+                sys_prompt = sys_part.replace("System:", "", 1).strip()
+                user_text = user_part.strip()
+                # Replace our generic system prompt with the green's
+                # benchmark-specific one. Subsequent turns will keep it.
+                if self.history and self.history[0].get("role") == "system":
+                    self.history[0]["content"] = sys_prompt
+                else:
+                    self.history.insert(
+                        0, {"role": "system", "content": sys_prompt}
+                    )
+            else:
+                user_text = raw_text
+
+        # ── parse incoming DataPart ─────────────────────────────────
+        incoming_tools: list[dict[str, Any]] | None = None
+        incoming_tool_results: list[dict[str, Any]] | None = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get("tools"), list):
+                incoming_tools = payload["tools"]
+            if isinstance(payload.get("tool_results"), list):
+                incoming_tool_results = payload["tool_results"]
+
+        if incoming_tools is not None:
+            self._car_bench_tools = incoming_tools
+
+        # ── ingest tool_results from prior turn ─────────────────────
+        if (
+            self._car_bench_pending_tool_calls
+            and incoming_tool_results is not None
+        ):
+            # Map results back to ids by NAME (CAR-bench's convention).
+            # Pop matched entries so duplicate tool names get distinct ids.
+            calls_by_name: dict[str, list[dict[str, Any]]] = {}
+            for tc in self._car_bench_pending_tool_calls:
+                calls_by_name.setdefault(
+                    tc["function"]["name"], []
+                ).append(tc)
+            for tr in incoming_tool_results:
+                name = tr.get("tool_name", "")
+                matched = calls_by_name.get(name) or []
+                if matched:
+                    tc = matched.pop(0)
+                    tool_call_id = tc["id"]
+                else:
+                    tool_call_id = f"unknown_{name}"
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": _truncate_tool_output(
+                        str(tr.get("content", ""))
+                    ),
+                })
+            self._car_bench_pending_tool_calls = None
+        elif user_text:
+            self.history.append({"role": "user", "content": user_text})
+
+        # ── LLM call with CAR-bench's tools ─────────────────────────
+        kwargs: dict[str, Any] = {
+            "model": model_name(),
+            "messages": self.history,
+        }
+        if self._car_bench_tools:
+            kwargs["tools"] = self._car_bench_tools
+            kwargs["tool_choice"] = "auto"
+            kwargs["parallel_tool_calls"] = False
+        if not reasoning_enabled():
+            kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+
+        resp = await _chat_completions_with_retry(self.client, **kwargs)
+        msg = resp.choices[0].message
+
+        # ── record assistant turn in history (full OpenAI shape) ────
+        assistant_entry: dict[str, Any] = {
+            "role": "assistant",
+            "content": msg.content,
+        }
+        if msg.tool_calls:
+            assistant_entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        self.history.append(assistant_entry)
+
+        # ── build the outgoing Parts list ───────────────────────────
+        parts: list[Part] = []
+        if msg.content:
+            parts.append(Part(root=TextPart(text=msg.content)))
+
+        if msg.tool_calls:
+            flat_calls: list[dict[str, Any]] = []
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                flat_calls.append({
+                    "tool_name": tc.function.name,
+                    "arguments": args,
+                })
+            parts.append(
+                Part(root=DataPart(data={"tool_calls": flat_calls}))
+            )
+            # Stash the openai-shape calls so next turn's tool_results can
+            # be matched by name -> id.
+            self._car_bench_pending_tool_calls = assistant_entry["tool_calls"]
+        else:
+            self._car_bench_pending_tool_calls = None
+
+        if not parts:
+            # Defensive: model returned nothing at all (e.g. reasoning
+            # eat-the-completion bug). Send an empty TextPart so the
+            # green's validator doesn't blow up on missing parts.
+            parts.append(Part(root=TextPart(text="")))
+
+        await updater.add_artifact(parts=parts, name="response")
 
     async def _terminal_shell(
         self,
