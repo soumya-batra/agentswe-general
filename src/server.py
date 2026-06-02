@@ -23,14 +23,23 @@ def main():
     args = parser.parse_args()
 
     # Print runtime config so we can confirm what the leaderboard's
-    # amber manifest actually pushed into the container. Look for
-    # `[AGENT CONFIG]` lines in c1-agent-1 logs.
+    # amber manifest actually pushed into the container. The leaderboard
+    # masks env-referenced values as `***` in its log capture, so we
+    # print DERIVED facts (booleans, lengths) instead of the raw values.
+    # Look for `[AGENT CONFIG]` lines in c1-agent-1 logs.
+    from llm import json_output, tools_enabled
+    json_raw = os.environ.get("JSON_OUTPUT", "")
+    tools_raw = os.environ.get("TOOLS_ENABLED", "")
+    model_raw = os.environ.get("MODEL_NAME", "")
+    base_raw = os.environ.get("OPENROUTER_BASE_URL", "")
     print(
         "[AGENT CONFIG] "
-        f"MODEL_NAME={os.environ.get('MODEL_NAME', '(unset)')!r} "
-        f"OPENROUTER_BASE_URL={os.environ.get('OPENROUTER_BASE_URL', '(unset)')!r} "
-        f"TOOLS_ENABLED={os.environ.get('TOOLS_ENABLED', '(unset)')!r} "
-        f"JSON_OUTPUT={os.environ.get('JSON_OUTPUT', '(unset)')!r} "
+        f"json_output_active={json_output()} "
+        f"tools_enabled_active={tools_enabled()} "
+        f"JSON_OUTPUT_len={len(json_raw)} "
+        f"TOOLS_ENABLED_len={len(tools_raw)} "
+        f"MODEL_NAME_len={len(model_raw)} "
+        f"OPENROUTER_BASE_URL_len={len(base_raw)} "
         f"OPENROUTER_API_KEY_set={bool(os.environ.get('OPENROUTER_API_KEY'))} "
         f"TAVILY_API_KEY_set={bool(os.environ.get('TAVILY_API_KEY'))}",
         flush=True,
