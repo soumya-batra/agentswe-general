@@ -30,6 +30,16 @@
       // expects {"name": "<tool>", "arguments": {...}}. The green's
       // policy text must mention "JSON" or the API will 400.
       json_output: { type: "boolean", default: false },
+
+      // Allow the model to use its hidden reasoning channel. For
+      // reasoning models (e.g. GLM-5) this is on by default upstream,
+      // but they can occasionally exhaust the completion budget in
+      // reasoning and emit zero visible content — `finish_reason=stop`
+      // with empty `content`. Turn OFF for benchmarks where that bug
+      // bites (currently tau2-bench). Leave ON where reasoning helps
+      // (SWE-bench, OfficeQA, anything that needs deep single-shot
+      // analysis).
+      reasoning_enabled: { type: "boolean", default: true },
     },
     required: ["openrouter_api_key"],
     additionalProperties: false,
@@ -54,6 +64,7 @@
       TAVILY_API_KEY: "${config.tavily_api_key}",
       TOOLS_ENABLED: "${config.tools_enabled}",
       JSON_OUTPUT: "${config.json_output}",
+      REASONING_ENABLED: "${config.reasoning_enabled}",
     },
 
     // UNCOMMENT alongside the slots.docker declaration above when

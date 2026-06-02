@@ -27,17 +27,20 @@ def main():
     # masks env-referenced values as `***` in its log capture, so we
     # print DERIVED facts (booleans, lengths) instead of the raw values.
     # Look for `[AGENT CONFIG]` lines in c1-agent-1 logs.
-    from llm import json_output, tools_enabled
+    from llm import json_output, reasoning_enabled, tools_enabled
     json_raw = os.environ.get("JSON_OUTPUT", "")
     tools_raw = os.environ.get("TOOLS_ENABLED", "")
+    reasoning_raw = os.environ.get("REASONING_ENABLED", "")
     model_raw = os.environ.get("MODEL_NAME", "")
     base_raw = os.environ.get("OPENROUTER_BASE_URL", "")
     print(
         "[AGENT CONFIG] "
         f"json_output_active={json_output()} "
         f"tools_enabled_active={tools_enabled()} "
+        f"reasoning_enabled_active={reasoning_enabled()} "
         f"JSON_OUTPUT_len={len(json_raw)} "
         f"TOOLS_ENABLED_len={len(tools_raw)} "
+        f"REASONING_ENABLED_len={len(reasoning_raw)} "
         f"MODEL_NAME_len={len(model_raw)} "
         f"OPENROUTER_BASE_URL_len={len(base_raw)} "
         f"OPENROUTER_API_KEY_set={bool(os.environ.get('OPENROUTER_API_KEY'))} "

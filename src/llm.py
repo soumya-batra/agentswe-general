@@ -34,6 +34,19 @@ def tools_enabled() -> bool:
     return raw not in ("0", "false", "no", "off", "")
 
 
+def reasoning_enabled() -> bool:
+    """Whether to let the model use its hidden reasoning channel.
+
+    Reasoning models (e.g. GLM-5) sometimes burn the entire completion
+    budget thinking and emit zero visible content (`finish_reason=stop`,
+    `msg.content==""`). For benchmarks where that bug bites — currently
+    tau2-bench — turn this OFF via the amber manifest. Keep ON elsewhere
+    so the model can do single-shot reasoning when it helps.
+    """
+    raw = os.environ.get("REASONING_ENABLED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
+
+
 def json_output() -> bool:
     """Enforce JSON-object output on the LLM via OpenAI's response_format.
 
