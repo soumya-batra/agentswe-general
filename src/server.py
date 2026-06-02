@@ -15,11 +15,26 @@ from executor import Executor
 
 
 def main():
+    import os
     parser = argparse.ArgumentParser(description="Run the A2A agent.")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9010)
     parser.add_argument("--card-url", type=str)
     args = parser.parse_args()
+
+    # Print runtime config so we can confirm what the leaderboard's
+    # amber manifest actually pushed into the container. Look for
+    # `[AGENT CONFIG]` lines in c1-agent-1 logs.
+    print(
+        "[AGENT CONFIG] "
+        f"MODEL_NAME={os.environ.get('MODEL_NAME', '(unset)')!r} "
+        f"OPENROUTER_BASE_URL={os.environ.get('OPENROUTER_BASE_URL', '(unset)')!r} "
+        f"TOOLS_ENABLED={os.environ.get('TOOLS_ENABLED', '(unset)')!r} "
+        f"JSON_OUTPUT={os.environ.get('JSON_OUTPUT', '(unset)')!r} "
+        f"OPENROUTER_API_KEY_set={bool(os.environ.get('OPENROUTER_API_KEY'))} "
+        f"TAVILY_API_KEY_set={bool(os.environ.get('TAVILY_API_KEY'))}",
+        flush=True,
+    )
 
     skill = AgentSkill(
         id="general_purpose",

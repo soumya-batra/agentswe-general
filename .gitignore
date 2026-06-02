@@ -12,3 +12,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local debug logs from tools/repro_*.py
+logs/

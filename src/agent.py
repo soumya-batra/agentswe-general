@@ -236,7 +236,7 @@ class Agent:
             tools=tools,
             updater=updater,
             workdir=self.workdir(),
-            max_steps=12,
+            max_steps=200,
         )
         # Generic mode doesn't pause; paused should always be None here.
 
@@ -379,7 +379,7 @@ class Agent:
             tools=tools,
             updater=updater,
             workdir=self.workdir(),
-            max_steps=8,
+            max_steps=200,
             pause_on={"shell_exec", "python_exec"},
         )
 
@@ -484,7 +484,7 @@ class Agent:
                 tools=tools,
                 updater=updater,
                 workdir=docker_wd,
-                max_steps=20,
+                max_steps=200,
             )
 
             diff = await docker_wd.diff()
