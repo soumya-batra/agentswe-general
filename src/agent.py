@@ -279,6 +279,17 @@ class Agent:
                         "even if it is numerically correct. Show your "
                         "reasoning before the tag; only the contents "
                         "between the tags are scored.\n\n"
+                        "# Arithmetic precision\n"
+                        "Preserve the operand ORDER and SIGN exactly as "
+                        "the question asks. 'Difference between A and B' "
+                        "means A - B (NOT B - A) — this changes the "
+                        "sign of the answer. 'Ratio of A to B' means "
+                        "A / B. 'A minus B' means A - B. When the "
+                        "result is negative, include the leading minus "
+                        "sign. Double-check the final sign before "
+                        "wrapping in the FINAL_ANSWER tags. For any "
+                        "non-trivial arithmetic, use `python_exec` "
+                        "rather than mental math.\n\n"
                         + retrieved
                     ),
                 })
