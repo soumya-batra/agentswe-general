@@ -20,12 +20,15 @@ lookups. We don't do that.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import os
 import re
 import shlex
 import tempfile
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
@@ -443,6 +446,19 @@ BEFORE each tool call or final answer, scan the existing notes. Do not
 contradict a CONSTRAINT, repeat a DONE step, or re-discover a FINDING.
 Keep notes SHORT (one line). Only commit things you will need later —
 don't narrate the obvious.
+
+## Recursive-LM scratchpad (`repl` + `context`)
+If a `repl` tool is available, you have a persistent in-agent Python
+interpreter where the `context` variable (list[dict]) holds every
+shell exec_result and prior repl execution from this conversation,
+UNTRUNCATED. The chat history shows truncated previews; the full
+outputs live in `context`. Use `repl` when you need to COMPUTE over
+raw tool output (regex, JSON parsing, slicing a 50K-char log) —
+something `note` (text snippets) and the sandbox history file
+(grep over shell-only) can't do. Examples:
+  print(context[-1]['stdout'][:5000])
+  import re; print(re.findall(r'FAIL.*', context[-1]['stdout']))
+  [c['command'] for c in context if c['kind']=='shell']
 """
 
 
@@ -504,6 +520,46 @@ class Agent:
         # file in its workdir (sweb / generic). One entry per turn /
         # tool call / tool result.
         self._history_log: list[dict[str, Any]] = []
+        # RLM scratchpad: untruncated record of every shell exec_result
+        # and every repl execution across all A2A turns. Lives in the
+        # agent process; the model reads/computes over it via the
+        # `repl` tool. The list is shared by reference with
+        # _repl_globals['context'] so model-side mutations are visible.
+        self.context: list[dict[str, Any]] = []
+        self._repl_globals: dict[str, Any] | None = None
+        # Most recent exec_request command stashed so we can pair it
+        # with the matching exec_result in `context`.
+        self._last_request_command: str | None = None
+
+    # ---- recursive-LM scratchpad --------------------------------------
+
+    def _init_repl(self) -> None:
+        # Same list object as self.context so dispatch-path appends
+        # show up inside the interpreter on subsequent calls.
+        self._repl_globals = {
+            "__builtins__": __builtins__,
+            "context": self.context,
+        }
+
+    def _exec_repl(self, code: str) -> str:
+        if self._repl_globals is None:
+            self._init_repl()
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                exec(code, self._repl_globals)
+        except Exception:
+            traceback.print_exc(file=buf_err)
+        stdout = buf_out.getvalue()
+        stderr = buf_err.getvalue()
+        self.context.append({
+            "kind": "repl",
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+        return f"stdout:\n{stdout}\nstderr:\n{stderr}"
 
     # ---- working notes -------------------------------------------------
 
@@ -1071,11 +1127,23 @@ class Agent:
             # echoed via stdout that contains "timed out" doesn't
             # accidentally trigger our timeout recovery nudge.
             raw_exit_code = payload.get("exit_code")
+            raw_stdout = payload.get("stdout", "") or ""
             raw_stderr = payload.get("stderr", "") or ""
             timed_out = _is_sandbox_timeout(raw_exit_code, raw_stderr)
+            # RLM scratchpad: record the full untruncated exec_result so
+            # the model can inspect/compute over it via `repl` without
+            # paying the truncated-history token cost.
+            self.context.append({
+                "kind": "shell",
+                "command": self._last_request_command,
+                "exit_code": raw_exit_code,
+                "stdout": raw_stdout,
+                "stderr": raw_stderr,
+            })
+            self._last_request_command = None
             result_text = _truncate_tool_output(
                 f"exit_code: {raw_exit_code}\n"
-                f"stdout:\n{payload.get('stdout', '')}\n"
+                f"stdout:\n{raw_stdout}\n"
                 f"stderr:\n{raw_stderr}"
             )
             self._record_history(
@@ -1135,6 +1203,10 @@ class Agent:
                 command = f"python3 -c {shlex.quote(args.get('code', ''))}"
             else:
                 command = args.get("command", "")
+            # Stash the BARE command (pre-timeout-wrap, pre-history-preface)
+            # so the matching exec_result we ingest next turn can be paired
+            # in `context` with what the model actually intended to run.
+            self._last_request_command = command
             # Record this tool call in our history log so the model can
             # grep /tmp/.agent/history.jsonl in subsequent turns.
             self._record_history(
@@ -1407,10 +1479,14 @@ class Agent:
                     name=tc.function.name,
                     extra={"tool_call_id": tc.id},
                 )
-                # Intercept the `note` tool here (needs Agent state,
-                # not available inside tool_dispatch).
+                # Intercept the `note` and `repl` tools here (both need
+                # Agent state — note touches self._notes, repl runs in
+                # self._repl_globals against self.context — neither of
+                # which is available inside tool_dispatch).
                 if tc.function.name == "note":
                     result = self._handle_note_tool(args)
+                elif tc.function.name == "repl":
+                    result = self._exec_repl(args.get("code", ""))
                 else:
                     result = await tool_dispatch(
                         tc.function.name, args, workdir=workdir
