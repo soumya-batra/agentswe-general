@@ -28,6 +28,10 @@ COPY src src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen
 
-ENTRYPOINT ["uv", "run", "src/server.py"]
+# Use the baked venv's python directly — skips `uv run`'s per-launch
+# venv revalidation (saves ~1-2s of cold start). Some leaderboards
+# have tight readiness windows; faster startup = fewer false fails.
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["/root/.venv/bin/python", "src/server.py"]
 CMD ["--host", "0.0.0.0", "--port", "9010"]
 EXPOSE 9010
