@@ -1,0 +1,22 @@
+[green_agent]
+endpoint = "http://green:8081"
+
+[[participants]]
+role = "agent"
+endpoint = "http://agent:8080"
+
+[config]
+# Run a single base task once for a quick smoke test.
+num_trials = 1
+task_split = "test"
+tasks_base_num_tasks = 1
+tasks_hallucination_num_tasks = 0
+tasks_disambiguation_num_tasks = 0
+max_steps = 50
+# Use direct Gemini API. CAR-bench's user simulator passes
+# reasoning_effort which only Gemini accepts natively (OpenAI/OpenRouter
+# reject it). gemini/gemini-2.5-flash is the CAR-bench default.
+user_model = "gemini/gemini-2.5-flash"
+user_provider = "gemini"
+policy_evaluator_model = "gemini/gemini-2.5-flash"
+policy_evaluator_provider = "gemini"

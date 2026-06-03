@@ -1,0 +1,61 @@
+services:
+  green:
+    container_name: carbench-green-repro
+    image: car-bench-green:local
+    command: ["--host", "0.0.0.0", "--port", "8081", "--card-url", "http://green:8081"]
+    ports: ["8081:8081"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      LOGURU_LEVEL: INFO
+      CAR_BENCH_DATA_DIR: /home/agentbeats/app/scenarios/car-bench/car-bench/car_bench/envs/car_voice_assistant/mock_data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8081/.well-known/agent-card.json\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      agent:
+        condition: service_healthy
+    networks: [agentnet]
+
+  agent:
+    container_name: carbench-agent-repro
+    image: ghcr.io/soumya-batra/agentswe-general:latest
+    command: ["--host", "0.0.0.0", "--port", "8080", "--card-url", "http://agent:8080"]
+    ports: ["8080:8080"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      MODEL_NAME: z-ai/glm-5
+      TOOLS_ENABLED: "false"
+      JSON_OUTPUT: "false"
+      REASONING_ENABLED: "true"
+      RETRIEVAL_ENABLED: "false"
+      TAVILY_API_KEY: ""
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/.well-known/agent-card.json\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks: [agentnet]
+
+  agentbeats-client:
+    image: ghcr.io/agentbeats/agentbeats-client:v1.0.0
+    container_name: carbench-client-repro
+    volumes:
+      - ./scenario.toml:/app/scenario.toml
+      - ./output:/app/output
+    command: ["scenario.toml", "output/results.json"]
+    depends_on:
+      green:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    networks: [agentnet]
+
+networks:
+  agentnet:
+    driver: bridge

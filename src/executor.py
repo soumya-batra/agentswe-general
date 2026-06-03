@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -13,7 +15,7 @@ from a2a.utils import (
     new_task,
 )
 
-from agent import Agent
+from agent import Agent, classify, extract_payload
 
 
 TERMINAL_STATES = {
@@ -33,6 +35,36 @@ class Executor(AgentExecutor):
         if not msg:
             raise ServerError(error=InvalidRequestError(message="Missing message in request"))
 
+        # Peek-classify the message to detect CAR-bench, which uses a
+        # Message-only response model (no Task lifecycle). Once a context
+        # is established as car_bench it stays car_bench (sticky).
+        ctx_id_from_msg = getattr(msg, "context_id", None) or ""
+        existing_agent = self.agents.get(ctx_id_from_msg) if ctx_id_from_msg else None
+        if existing_agent and existing_agent.handler == "car_bench":
+            handler_hint = "car_bench"
+        else:
+            payload_peek, raw_text_peek = extract_payload(msg)
+            handler_hint = classify(payload_peek, raw_text_peek)
+
+        if handler_hint == "car_bench":
+            context_id = ctx_id_from_msg or uuid4().hex
+            agent = existing_agent
+            if not agent:
+                agent = Agent()
+                agent.handler = "car_bench"
+                self.agents[context_id] = agent
+            try:
+                await agent.run_car_bench(msg, event_queue, context_id)
+            except Exception as e:
+                print(f"car_bench failed: {e}")
+                await event_queue.enqueue_event(
+                    new_agent_text_message(
+                        f"Agent error: {e}", context_id=context_id
+                    )
+                )
+            return
+
+        # Standard Task-style flow for every other handler.
         task = context.current_task
         if task and task.status.state in TERMINAL_STATES:
             raise ServerError(error=InvalidRequestError(message=f"Task {task.id} already processed (state: {task.status.state})"))

@@ -28,7 +28,7 @@ from typing import Any
 import openai
 from a2a.server.tasks import TaskUpdater
 from a2a.types import DataPart, Message, Part, TaskState, TextPart
-from a2a.utils import new_agent_text_message
+from a2a.utils import new_agent_parts_message, new_agent_text_message
 
 from llm import (
     json_output,
@@ -222,9 +222,9 @@ class Agent:
             await self._terminal_shell(payload, raw_text, updater)
         elif self.handler == "swe_bench":
             await self._swe_bench(payload, updater)
-        elif self.handler == "car_bench":
-            await self._car_bench(payload, raw_text, updater)
         else:
+            # car_bench is dispatched by the executor BEFORE we get here
+            # (it uses a Message-only response model, no task lifecycle).
             await self._generic(payload, raw_text, updater)
 
     # ---- handlers ------------------------------------------------------
@@ -402,13 +402,13 @@ class Agent:
             name="openai_response",
         )
 
-    async def _car_bench(
+    async def run_car_bench(
         self,
-        payload: Any,
-        raw_text: str,
-        updater: TaskUpdater,
+        message: Message,
+        event_queue: Any,
+        context_id: str,
     ) -> None:
-        """CAR-bench protocol (in-car voice assistant).
+        """CAR-bench protocol (in-car voice assistant) — Message mode.
 
         Per turn the green sends a mix of TextPart and DataPart:
         - TextPart on first turn: 'System:\\n<policy>\\n\\nUser:\\n<utterance>'
@@ -416,17 +416,24 @@ class Agent:
         - DataPart on first turn: {"tools": [...openai-style schemas...]}
         - DataPart on later turns: {"tool_results": [{"tool_name", "content"}]}
 
-        We reply with a list of Parts:
+        We reply with a Message (NOT a Task update) containing a list
+        of Parts:
         - TextPart with content (for user-facing replies)
         - DataPart with {"tool_calls": [{"tool_name", "arguments": {...}}]}
           (flat shape — CAR-bench identifies by NAME, not id)
 
+        Why Message mode: the green's tool_provider asserts
+        `status == "completed"` AND keeps reusing the same task_id
+        across turns. Those two requirements are mutually exclusive in
+        a Task lifecycle (terminal tasks reject new sends). Message
+        responses have no task lifecycle, so the green never sees a
+        terminal task; each turn the conversation continues cleanly.
+
         State across turns lives on self: history (OpenAI-format),
         _car_bench_tools (cached schemas), and _car_bench_pending_tool_calls
         (so we can map next turn's tool_results back to ids by name).
-        Mirrors the reference baseline at
-        CAR-bench/car-bench-agentbeats/src/purple_car_bench_agent.
         """
+        payload, raw_text = extract_payload(message)
         # ── parse incoming TextPart ─────────────────────────────────
         user_text: str | None = None
         if raw_text:
@@ -553,7 +560,15 @@ class Agent:
             # green's validator doesn't blow up on missing parts.
             parts.append(Part(root=TextPart(text="")))
 
-        await updater.add_artifact(parts=parts, name="response")
+        # Emit a Message event directly — no Task creation, no
+        # add_artifact, no update_status. The A2A SDK request handler
+        # turns this into a Message-kind JSON-RPC response; the green's
+        # sync_client picks it up as `raw_message` and reads parts off
+        # it. Because there is no task, there is no task lifecycle to
+        # collide with the green's next-turn reuse of any task_id.
+        await event_queue.enqueue_event(
+            new_agent_parts_message(parts, context_id=context_id)
+        )
 
     async def _terminal_shell(
         self,
