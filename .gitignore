@@ -15,3 +15,8 @@ wheels/
 
 # Local debug logs from tools/repro_*.py
 logs/
+
+# Local repro outputs / traces (not for source control)
+tools/repro_terminalbench_e2e/output/
+tools/repro_tau2/output/
+tools/repro_carbench_e2e/output/

@@ -6,11 +6,12 @@ role = "agent"
 endpoint = "http://agent:8080"
 
 [config]
-# Run a single base task once for a quick smoke test.
+# Run 1 hallucination task — higher chance of hitting the claim-
+# success-after-tool-error failure pattern than base.
 num_trials = 1
 task_split = "test"
-tasks_base_num_tasks = 1
-tasks_hallucination_num_tasks = 0
+tasks_base_num_tasks = 0
+tasks_hallucination_num_tasks = 1
 tasks_disambiguation_num_tasks = 0
 max_steps = 50
 # Use direct Gemini API. CAR-bench's user simulator passes

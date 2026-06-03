@@ -164,6 +164,50 @@ PYTHON_EXEC = {
 }
 
 
+NOTE = {
+    "type": "function",
+    "function": {
+        "name": "note",
+        "description": (
+            "Add, remove, or list short entries in your working memory. "
+            "Working memory persists across turns and is injected at the "
+            "TOP of every turn under '# Working notes'. Use it for short "
+            "one-line entries you will reference LATER — constraints, "
+            "findings, decisions, plans, blockers, completed steps.\n\n"
+            "Suggested prefixes inside the text: [CONSTRAINT: ...], "
+            "[FINDING: ...], [DECISION: ...], [PLAN: ...], "
+            "[BLOCKED-ON: ...], [DONE: ...]. Use whichever fits.\n\n"
+            "BEFORE each tool call or final answer, scan your notes; do "
+            "not contradict a CONSTRAINT, repeat a DONE step, or "
+            "re-discover a FINDING. Keep notes SHORT (one line)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "remove", "list"],
+                    "description": (
+                        "'add' to commit a new note; 'remove' with "
+                        "text='n3' to drop note n3; 'list' to dump "
+                        "the current notes."
+                    ),
+                },
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "For action='add': the note content (one line, "
+                        "short). For action='remove': the id like 'n3'. "
+                        "Ignored for action='list'."
+                    ),
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 RETRIEVE_DOCUMENTS = {
     "type": "function",
     "function": {
@@ -203,7 +247,7 @@ RETRIEVE_DOCUMENTS = {
 
 
 GENERIC_TOOL_SCHEMAS = [
-    WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE
+    WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE, NOTE
 ]
 
 

@@ -21,11 +21,74 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shlex
 import tempfile
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 import openai
+
+
+# ---------------------------------------------------------------------------
+# Trace logging — when AGENT_TRACE_DIR is set, every LLM call, A2A
+# in/out, and notes mutation is appended as one JSON object per line to
+# a session file in that dir. Off by default. Use only for local debug.
+_TRACE_DIR = os.environ.get("AGENT_TRACE_DIR", "").strip() or None
+_TRACE_PATH: str | None = None
+if _TRACE_DIR:
+    try:
+        os.makedirs(_TRACE_DIR, exist_ok=True)
+        _TRACE_PATH = os.path.join(
+            _TRACE_DIR,
+            f"trace_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}.jsonl",
+        )
+    except Exception as _e:
+        print(f"[trace] disabled — failed to create {_TRACE_DIR}: {_e}")
+        _TRACE_PATH = None
+
+
+def _trace(event: str, **fields: Any) -> None:
+    """Append a structured trace record. No-op if AGENT_TRACE_DIR unset."""
+    if not _TRACE_PATH:
+        return
+    rec: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "t": time.monotonic(),
+        "event": event,
+    }
+    rec.update(fields)
+    try:
+        with open(_TRACE_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
+    except Exception as _e:
+        # Never break the agent because tracing failed
+        print(f"[trace] write failed: {_e}")
+
+
+def _trace_msg_summary(msg: Any) -> dict[str, Any]:
+    """Compact dict-form of an OpenAI ChatCompletionMessage."""
+    out: dict[str, Any] = {}
+    try:
+        out["role"] = getattr(msg, "role", None)
+        content = getattr(msg, "content", None)
+        out["content_len"] = len(content) if content else 0
+        out["content"] = content
+        tc = getattr(msg, "tool_calls", None)
+        if tc:
+            out["tool_calls"] = [
+                {
+                    "id": t.id,
+                    "name": t.function.name,
+                    "arguments": t.function.arguments,
+                }
+                for t in tc
+            ]
+    except Exception as _e:
+        out["error"] = str(_e)
+    return out
 from a2a.server.tasks import TaskUpdater
 from a2a.types import DataPart, Message, Part, TaskState, TextPart
 from a2a.utils import new_agent_parts_message, new_agent_text_message
@@ -172,28 +235,59 @@ async def _chat_completions_with_retry(client, *, max_attempts: int = 4, **kwarg
                 openai.RateLimitError,
                 openai.InternalServerError,
                 json.JSONDecodeError,
-            ):
+            ) as e:
+                _trace(
+                    "llm_call_retry",
+                    attempt=attempt,
+                    error=f"{type(e).__name__}: {e}",
+                )
                 if attempt == max_attempts - 1:
                     raise
                 await asyncio.sleep(delay)
                 delay *= 2
 
+    _trace(
+        "llm_call_request",
+        model=kwargs.get("model"),
+        n_messages=len(kwargs.get("messages", [])),
+        messages=kwargs.get("messages"),
+        tools=kwargs.get("tools"),
+        tool_choice=kwargs.get("tool_choice"),
+        response_format=kwargs.get("response_format"),
+        seed=kwargs.get("seed"),
+        extra_body=kwargs.get("extra_body"),
+        parallel_tool_calls=kwargs.get("parallel_tool_calls"),
+    )
     resp = await _one_call(kwargs)
     choice = resp.choices[0]
     msg = choice.message
+    _trace(
+        "llm_call_response",
+        finish_reason=choice.finish_reason,
+        model_routed=getattr(resp, "model", None),
+        usage=getattr(resp, "usage", None),
+        msg=_trace_msg_summary(msg),
+    )
     empty_content = not (msg.content or "").strip()
     no_tool_calls = not msg.tool_calls
     finished_clean = choice.finish_reason == "stop"
     if empty_content and no_tool_calls and finished_clean:
+        _trace("llm_empty_retry_triggered")
         retry_kwargs = dict(kwargs)
         extra = dict(retry_kwargs.get("extra_body") or {})
         extra["reasoning"] = {"enabled": False}
         retry_kwargs["extra_body"] = extra
         try:
             retry_resp = await _one_call(retry_kwargs)
-        except Exception:
+        except Exception as e:
+            _trace("llm_empty_retry_failed", error=f"{type(e).__name__}: {e}")
             return resp  # original at least has a parseable shape
         retry_msg = retry_resp.choices[0].message
+        _trace(
+            "llm_empty_retry_response",
+            finish_reason=retry_resp.choices[0].finish_reason,
+            msg=_trace_msg_summary(retry_msg),
+        )
         if (retry_msg.content or "").strip() or retry_msg.tool_calls:
             return retry_resp
     return resp
@@ -220,6 +314,15 @@ def extract_payload(message: Message) -> tuple[Any, str]:
         elif isinstance(part.root, TextPart):
             text_chunks.append(part.root.text)
     text = "\n".join(text_chunks)
+
+    _trace(
+        "a2a_incoming",
+        message_id=getattr(message, "message_id", None),
+        context_id=getattr(message, "context_id", None),
+        n_parts=len(message.parts),
+        data_payload=data_obj,
+        raw_text=text,
+    )
 
     if data_obj is not None:
         return data_obj, text
@@ -281,7 +384,91 @@ Guidelines:
   recursive searches, package installs), narrow the scope, set explicit
   timeouts (`timeout 25 ...`), or run in the background (`nohup ... &`)
   and check results in a later step.
+
+## Tool-result discipline (CRITICAL)
+NEVER claim an action succeeded if the tool result indicates failure.
+If a tool's response contains `"Error"`, `"error"`, `status: "FAILURE"`,
+or is missing the expected fields, you MUST:
+  1. Acknowledge the failure to the user in plain language.
+  2. Either retry with corrected arguments, ask the user for missing
+     info, or honestly state the limitation.
+Do NOT proceed to the next step or to a confident success message.
+Example of WRONG behavior — DO NOT do this:
+  tool returns: `Error: SetFanSpeed.invoke() missing required arg 'level'`
+  assistant says: "Great! I've turned on the air conditioning for you."
+This is a hallucination and will fail evaluation.
+
+## Policy obligations
+When the task includes a policy document or domain rules (often in the
+system prompt or benchmark_context), treat its pre-condition checks as
+HARD requirements. Common pattern: "before activating X, check the
+state of Y". If you skip the check and go straight to the action, even
+if the action succeeds, the task fails. When in doubt, run the check.
+
+## Ambiguous user requests
+If a user request could refer to multiple distinct entities (e.g. "the
+reading light" when there are several seats, "the window" when several
+are open), ASK which one rather than guessing or applying to all.
+Over-acting on ambiguity is a common failure mode.
+
+## Conversation history file
+Your previous turns (your tool calls and their results) are appended to
+`/tmp/.agent/history.jsonl` inside your sandbox shell. When context
+gets long and you need to recall an earlier finding, grep / cat that
+file instead of re-running discovery commands. Example:
+  grep -i "window_driver_position" /tmp/.agent/history.jsonl
+  tail -n 5 /tmp/.agent/history.jsonl
+Each line is a JSON object with fields `turn`, `kind`
+(`task` | `tool_call` | `tool_result`), `name`, and `text`.
+
+## Working memory (notes)
+You have a working memory that PERSISTS across turns and is injected
+at the TOP of every turn under "# Working notes". Use it to commit
+short one-line entries you'll need to reference later. Suggested
+prefixes (use what fits, invent your own only if needed):
+  [CONSTRAINT: ...]    — a rule/policy that must be obeyed
+  [FINDING: ...]       — a discovery (file path, value, fact)
+  [DECISION: ...]      — a decision you made + the reason
+  [PLAN: ...]          — your next step(s)
+  [BLOCKED-ON: ...]    — what's blocking you
+  [DONE: ...]          — a completed step
+
+How to add notes:
+- If you have a `note` tool available, call it: `note(action="add", text="...")`.
+- Otherwise, emit `[NOTE-ADD: <text>]` anywhere in your response. It
+  will be stripped before downstream parsing.
+To remove: tool `note(action="remove", text="n3")` or `[NOTE-REMOVE: n3]`.
+
+BEFORE each tool call or final answer, scan the existing notes. Do not
+contradict a CONSTRAINT, repeat a DONE step, or re-discover a FINDING.
+Keep notes SHORT (one line). Only commit things you will need later —
+don't narrate the obvious.
 """
+
+
+_NOTES_TOOL_INSTRUCTION_TEXT = (
+    "## Working memory (notes)\n"
+    "You have a working memory that persists across turns and is "
+    "injected at the TOP of every turn under '# Working notes'. Use "
+    "it to commit short one-line entries you will need later.\n\n"
+    "Suggested prefixes (use what fits): [CONSTRAINT: ...], "
+    "[FINDING: ...], [DECISION: ...], [PLAN: ...], [BLOCKED-ON: ...], "
+    "[DONE: ...].\n\n"
+    "To ADD a note: emit `[NOTE-ADD: <text>]` anywhere in your "
+    "response. It will be stripped from the response your caller "
+    "sees but stored in your working memory.\n"
+    "To REMOVE a note: emit `[NOTE-REMOVE: n3]` (use the n<id> shown "
+    "next to each note).\n\n"
+    "BEFORE each action or final answer, scan your existing notes. "
+    "Do not contradict a CONSTRAINT, repeat a DONE step, or "
+    "re-discover a FINDING. Keep notes SHORT (one line). Only commit "
+    "things you will reference later."
+)
+
+
+_NOTES_TAG_ADD = re.compile(r"\[NOTE-ADD:\s*(.*?)\]", re.DOTALL)
+_NOTES_TAG_REMOVE = re.compile(r"\[NOTE-REMOVE:\s*n(\d+)\s*\]")
+_NOTES_SOFT_CAP = 50
 
 
 class Agent:
@@ -307,6 +494,132 @@ class Agent:
         # map incoming tool_results back to their tool_call_id by name.
         self._car_bench_tools: list[dict[str, Any]] | None = None
         self._car_bench_pending_tool_calls: list[dict[str, Any]] | None = None
+        # Working memory — persistent notes across turns. Each note is
+        # a short string; survives history truncation. Soft-capped at
+        # _NOTES_SOFT_CAP; when over, oldest gets dropped.
+        self._notes: list[tuple[int, str]] = []
+        self._next_note_id: int = 1
+        # Per-conversation history log — append-only JSONL, surfaced to
+        # the model via a file in its shell (terminal-bench) or via a
+        # file in its workdir (sweb / generic). One entry per turn /
+        # tool call / tool result.
+        self._history_log: list[dict[str, Any]] = []
+
+    # ---- working notes -------------------------------------------------
+
+    def _note_add(self, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return "[note: empty text, not added]"
+        nid = self._next_note_id
+        self._next_note_id += 1
+        self._notes.append((nid, text))
+        if len(self._notes) > _NOTES_SOFT_CAP:
+            # Drop the oldest to stay within budget.
+            self._notes = self._notes[-_NOTES_SOFT_CAP:]
+        return f"[note added: n{nid}]"
+
+    def _note_remove(self, key: str) -> str:
+        key = (key or "").strip().lstrip("n")
+        try:
+            target_id = int(key)
+        except (TypeError, ValueError):
+            return f"[note: bad id {key!r}, not removed]"
+        before = len(self._notes)
+        self._notes = [(i, t) for (i, t) in self._notes if i != target_id]
+        return (
+            f"[note n{target_id} removed]"
+            if len(self._notes) < before
+            else f"[note: no n{target_id} to remove]"
+        )
+
+    def _notes_system_message(self) -> dict[str, str] | None:
+        if not self._notes:
+            return None
+        lines = "\n".join(f"[n{i}] {t}" for i, t in self._notes)
+        return {
+            "role": "system",
+            "content": (
+                "# Working notes (carry-forward across turns):\n"
+                + lines
+                + "\nScan these BEFORE your next action; do not "
+                "contradict, repeat, or rediscover them."
+            ),
+        }
+
+    # ---- history log --------------------------------------------------
+
+    def _record_history(
+        self,
+        kind: str,
+        text: str,
+        *,
+        name: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one entry to the conversation history log."""
+        entry: dict[str, Any] = {
+            "turn": len(self._history_log),
+            "kind": kind,
+            # Cap each entry at ~80 KB so a single huge tool output
+            # doesn't push the JSONL past sandbox shell limits.
+            "text": (text or "")[:80_000],
+        }
+        if name:
+            entry["name"] = name
+        if extra:
+            entry.update(extra)
+        self._history_log.append(entry)
+        _trace("history_append", entry=entry)
+        return entry
+
+    def _history_jsonl_preface(self) -> str:
+        """Shell command that writes the LATEST history entry to the
+        sandbox's /tmp/.agent/history.jsonl, used by terminal-bench
+        before each exec_request. Empty string if there's nothing to
+        write. Failsafe — never errors the parent command."""
+        if not self._history_log:
+            return ""
+        # Encode as base64 to dodge ALL quoting hazards (newlines,
+        # backticks, $ expansions, single quotes inside JSON).
+        import base64
+        line = json.dumps(self._history_log[-1])
+        b64 = base64.b64encode((line + "\n").encode("utf-8")).decode("ascii")
+        return (
+            "mkdir -p /tmp/.agent >/dev/null 2>&1; "
+            f"echo {b64} | base64 -d >> /tmp/.agent/history.jsonl 2>/dev/null; "
+        )
+
+    def _extract_text_notes(self, content: str | None) -> str:
+        """Pull [NOTE-ADD: ...] / [NOTE-REMOVE: nK] markup out of
+        free-form text content, mutate self._notes, return the cleaned
+        content with the markup stripped (so the downstream consumer
+        — green's parser, judge, etc. — doesn't see it)."""
+        if not content:
+            return content or ""
+        for m in _NOTES_TAG_ADD.findall(content):
+            self._note_add(m)
+        for m in _NOTES_TAG_REMOVE.findall(content):
+            self._note_remove(m)
+        cleaned = _NOTES_TAG_ADD.sub("", content)
+        cleaned = _NOTES_TAG_REMOVE.sub("", cleaned)
+        # Tidy up leftover whitespace from removed tags.
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
+
+    def _handle_note_tool(self, args: dict[str, Any]) -> str:
+        """Process a `note` tool call. args = {action, text}."""
+        action = str(args.get("action", "")).strip().lower()
+        text = str(args.get("text", ""))
+        if action == "add":
+            return self._note_add(text)
+        if action == "remove":
+            return self._note_remove(text)
+        if action == "list":
+            if not self._notes:
+                return "[no notes]"
+            return "\n".join(f"[n{i}] {t}" for i, t in self._notes)
+        return f"[note: unknown action {action!r}; use add | remove | list]"
 
     def workdir(self) -> Workdir:
         if self._workdir is None:
@@ -319,6 +632,7 @@ class Agent:
         # Sticky handler: classify on first message, keep using it.
         if self.handler is None:
             self.handler = classify(payload, raw_text)
+        _trace("handler_dispatch", handler=self.handler)
 
         await updater.update_status(
             TaskState.working,
@@ -470,6 +784,18 @@ class Agent:
                     *(m for m in messages if isinstance(m, dict) and m.get("role") != "system"),
                 ]
 
+        # Inject working notes (if any) and a one-time tools-disabled
+        # notes instruction. The benchmark's own tool surface stays
+        # primary; this just gives the model a private persistent
+        # scratch it can write to via [NOTE-ADD: ...] markup.
+        notes_msg = self._notes_system_message()
+        notes_instr = {"role": "system", "content": _NOTES_TOOL_INSTRUCTION_TEXT}
+        prefix: list[dict[str, Any]] = []
+        if notes_msg:
+            prefix.append(notes_msg)
+        prefix.append(notes_instr)
+        messages = prefix + list(messages)
+
         kwargs: dict[str, Any] = {
             "model": model_name(),
             "messages": messages,
@@ -489,6 +815,10 @@ class Agent:
         choice = resp.choices[0]
         msg = choice.message
 
+        # Strip and store any [NOTE-ADD/-REMOVE] markup the model
+        # emitted in content BEFORE forwarding to pi-bench's parser.
+        cleaned_content = self._extract_text_notes(msg.content)
+
         # Build the response payload pi-bench's purple_adapter understands.
         # Its _part_to_pi_msg expects tool_calls as a flat list of
         # {id, name, arguments} (NOT the OpenAI SDK's nested
@@ -503,8 +833,17 @@ class Agent:
                 }
                 for tc in msg.tool_calls
             ]
-        if msg.content:
-            data["content"] = msg.content
+        if cleaned_content:
+            data["content"] = cleaned_content
+
+        _trace(
+            "a2a_outgoing",
+            handler="openai_passthrough",
+            raw_content=msg.content,
+            cleaned_content=cleaned_content,
+            tool_calls=data.get("tool_calls"),
+            notes_state=list(self._notes),
+        )
 
         await updater.add_artifact(
             parts=[Part(root=DataPart(data=data))],
@@ -605,9 +944,27 @@ class Agent:
             self.history.append({"role": "user", "content": user_text})
 
         # ── LLM call with CAR-bench's tools ─────────────────────────
+        # Inject working-notes (if any) + a one-time tools-disabled
+        # notes instruction so the model knows to use [NOTE-ADD: ...]
+        # markup. Notes go right after the existing system prompt.
+        notes_msg = self._notes_system_message()
+        notes_instr = {"role": "system", "content": _NOTES_TOOL_INSTRUCTION_TEXT}
+        if self.history and self.history[0].get("role") == "system":
+            prefix: list[dict[str, Any]] = [self.history[0]]
+            if notes_msg:
+                prefix.append(notes_msg)
+            prefix.append(notes_instr)
+            messages = prefix + self.history[1:]
+        else:
+            prefix = []
+            if notes_msg:
+                prefix.append(notes_msg)
+            prefix.append(notes_instr)
+            messages = prefix + list(self.history)
+
         kwargs: dict[str, Any] = {
             "model": model_name(),
-            "messages": self.history,
+            "messages": messages,
         }
         if self._car_bench_tools:
             kwargs["tools"] = self._car_bench_tools
@@ -666,6 +1023,19 @@ class Agent:
             # green's validator doesn't blow up on missing parts.
             parts.append(Part(root=TextPart(text="")))
 
+        _trace(
+            "a2a_outgoing",
+            handler="car_bench",
+            raw_content=msg.content,
+            text_parts=[
+                p.root.text for p in parts if isinstance(p.root, TextPart)
+            ],
+            data_parts=[
+                p.root.data for p in parts if isinstance(p.root, DataPart)
+            ],
+            notes_state=list(self._notes),
+        )
+
         # Emit a Message event directly — no Task creation, no
         # add_artifact, no update_status. The A2A SDK request handler
         # turns this into a Message-kind JSON-RPC response; the green's
@@ -695,6 +1065,7 @@ class Agent:
         if kind == "task":
             instruction = payload.get("instruction") or raw_text
             self.history.append({"role": "user", "content": instruction})
+            self._record_history("task", instruction)
         elif kind == "exec_result":
             # Examine the raw fields BEFORE we merge them, so a log file
             # echoed via stdout that contains "timed out" doesn't
@@ -706,6 +1077,11 @@ class Agent:
                 f"exit_code: {raw_exit_code}\n"
                 f"stdout:\n{payload.get('stdout', '')}\n"
                 f"stderr:\n{raw_stderr}"
+            )
+            self._record_history(
+                "tool_result",
+                result_text,
+                extra={"exit_code": raw_exit_code, "timed_out": timed_out},
             )
             if self.pending_protocol_tool_id is None:
                 # Out-of-band exec_result; treat as user content so the
@@ -759,6 +1135,31 @@ class Agent:
                 command = f"python3 -c {shlex.quote(args.get('code', ''))}"
             else:
                 command = args.get("command", "")
+            # Record this tool call in our history log so the model can
+            # grep /tmp/.agent/history.jsonl in subsequent turns.
+            self._record_history(
+                "tool_call",
+                command,
+                name=tc["name"],
+                extra={"tool_call_id": tc["id"]},
+            )
+            # Prepend a heartbeat that writes the latest history entry
+            # into the sandbox. base64-safe; failure does not break
+            # the user-visible command.
+            preface = self._history_jsonl_preface()
+            # Cap each command at 25s so the green's hard 30s sandbox
+            # kill never fires — `timeout 25` exits with code 124, which
+            # is what _is_sandbox_timeout already recognizes, so the
+            # model gets the existing timeout-recovery nudge. Skip if
+            # the model already added `timeout` themselves.
+            stripped = command.lstrip()
+            if not stripped.startswith("timeout "):
+                command = f"timeout 25 sh -c {shlex.quote(command)}"
+            # History preface runs FIRST, then the user command (with
+            # its own timeout wrap). Using ; not && — the preface is
+            # best-effort, not a gate.
+            if preface:
+                command = preface + command
             await self._send_protocol_message(
                 updater,
                 {
@@ -890,9 +1291,19 @@ class Agent:
         """
         pause_on = pause_on or set()
         for step in range(max_steps):
+            # Inject working notes as a transient system message at the
+            # top of context (NOT mutated into self.history — we want
+            # the freshest version every turn, including any notes the
+            # model just wrote in the previous step).
+            notes_msg = self._notes_system_message()
+            messages = (
+                [self.history[0], notes_msg] + self.history[1:]
+                if notes_msg and self.history
+                else self.history
+            )
             kwargs: dict[str, Any] = {
                 "model": model_name(),
-                "messages": self.history,
+                "messages": messages,
             }
             if tools:
                 kwargs["tools"] = tools
@@ -907,6 +1318,21 @@ class Agent:
 
             resp = await _chat_completions_with_retry(self.client, **kwargs)
             msg = resp.choices[0].message
+            # Parse any [NOTE-ADD/-REMOVE] markers out of msg.content.
+            # The model could use either the tool OR text markup; we
+            # accept both. Cleaned content goes into history so the
+            # markers don't pollute the model's view of its own past.
+            raw_content_before_notes = msg.content
+            if msg.content:
+                msg.content = self._extract_text_notes(msg.content)
+            if raw_content_before_notes != msg.content:
+                _trace(
+                    "chat_loop_notes_stripped",
+                    step=step,
+                    raw=raw_content_before_notes,
+                    cleaned=msg.content,
+                    notes_state=list(self._notes),
+                )
 
             assistant_entry: dict[str, Any] = {
                 "role": "assistant",
@@ -927,6 +1353,12 @@ class Agent:
             self.history.append(assistant_entry)
 
             if not msg.tool_calls:
+                _trace(
+                    "chat_loop_final",
+                    step=step,
+                    final_text=msg.content or "",
+                    notes_state=list(self._notes),
+                )
                 return msg.content or "", None
 
             paused_calls = [
@@ -968,10 +1400,28 @@ class Agent:
 
             for tc in msg.tool_calls:
                 args = _args_dict(tc.function.arguments)
-                result = await tool_dispatch(
-                    tc.function.name, args, workdir=workdir
+                # Record the tool call in the searchable history log.
+                self._record_history(
+                    "tool_call",
+                    json.dumps(args, ensure_ascii=False)[:2000],
+                    name=tc.function.name,
+                    extra={"tool_call_id": tc.id},
                 )
+                # Intercept the `note` tool here (needs Agent state,
+                # not available inside tool_dispatch).
+                if tc.function.name == "note":
+                    result = self._handle_note_tool(args)
+                else:
+                    result = await tool_dispatch(
+                        tc.function.name, args, workdir=workdir
+                    )
                 truncated = _truncate_tool_output(result)
+                self._record_history(
+                    "tool_result",
+                    truncated,
+                    name=tc.function.name,
+                    extra={"tool_call_id": tc.id},
+                )
                 self.history.append(
                     {
                         "role": "tool",

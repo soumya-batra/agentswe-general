@@ -1,0 +1,60 @@
+services:
+  green:
+    image: ghcr.io/rdi-foundation/terminal-bench-green@sha256:c969a84ec648721d3ecbd62787ef8e1c2ada6ad85a215a275f33aa012cca5f49
+    container_name: tb-green-repro
+    # Run as root so the mounted /var/run/docker.sock is accessible. The
+    # baked image runs as user "agent" which can't reach the socket.
+    user: "0:0"
+    command: ["--host", "0.0.0.0", "--port", "9009", "--card-url", "http://green:9009"]
+    ports:
+      - "9019:9009"
+      - "9100:9010"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LOGURU_LEVEL: INFO
+      WORKSPACE: /workspace
+      # Agent (purple) is on shared docker network "tbnet" as host "agent".
+      # The agent reaches green's exec API via http://green:9010.
+      EXEC_BASE_URL: http://green:9010
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - tb-workspace:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9009/.well-known/agent-card.json\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
+    networks: [tbnet]
+
+  agent:
+    image: ghcr.io/soumya-batra/agentswe-general:latest
+    container_name: tb-agent-repro
+    command: ["--host", "0.0.0.0", "--port", "9010", "--card-url", "http://agent:9010"]
+    ports:
+      - "9012:9010"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      MODEL_NAME: z-ai/glm-5
+      TOOLS_ENABLED: "true"
+      JSON_OUTPUT: "false"
+      REASONING_ENABLED: "true"
+      RETRIEVAL_ENABLED: "false"
+      AGENT_TRACE_DIR: /traces
+    volumes:
+      - ./output/traces:/traces
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9010/.well-known/agent-card.json\")'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks: [tbnet]
+
+networks:
+  tbnet:
+    driver: bridge
+
+volumes:
+  tb-workspace:
