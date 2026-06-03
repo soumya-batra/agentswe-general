@@ -34,10 +34,10 @@ The agent dispatches incoming messages by their **structure**, not their benchma
 
 | Benchmark | Category | Score |
 |---|---|---|
-| Terminal Bench 2.0 | Coding | 34 / 89 |
-| τ²-Bench | τ² | 34 / 50 |
+| Terminal Bench 2.0 | Coding | 41 / 89 |
+| τ²-Bench | τ² | 100 / 114 |
 | OfficeQA | Finance | 114 / 246 |
-| Pi-Bench | Agent Safety | 78.9 *(lower is better)* |
+| Pi-Bench | Agent Safety | 78.9 |
 | CAR-bench | Computer Use & Web | 0.64 |
 
 Five working benchmarks across five distinct AgentBeats categories — comfortably above the Sprint 4 eligibility floor of five greens in three categories.
