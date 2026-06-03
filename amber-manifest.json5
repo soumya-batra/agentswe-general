@@ -57,13 +57,13 @@
     additionalProperties: false,
   },
 
-  // UNCOMMENT before submitting to SWE-bench or terminal-bench (their
-  // newer amber-cli supports docker slots). Leave commented for tau2
-  // and any leaderboard running amber-cli v0, which doesn't know the
-  // `docker` slot kind.
-  // slots: {
-  //   docker: { kind: "docker", optional: true },
-  // },
+  // Docker slot — required by SWE-bench and terminal-bench (their
+  // newer amber-cli supports it). Keep commented for tau2 / pi-bench /
+  // CAR-bench leaderboards running amber-cli v0, which doesn't know
+  // the `docker` slot kind.
+  slots: {
+    docker: { kind: "docker", optional: true },
+  },
 
   program: {
     image: "ghcr.io/soumya-batra/agentswe-general:latest",
@@ -84,11 +84,11 @@
       FAISS_INDEX_DIR: "/app/faiss_index",
     },
 
-    // UNCOMMENT alongside the slots.docker declaration above when
-    // submitting to SWE-bench / terminal-bench.
-    // mounts: [
-    //   { path: "/var/run/docker.sock", from: "framework.docker" },
-    // ],
+    // Mount paired with the slots.docker declaration above. Comment
+    // back out for tau2 / pi-bench / CAR-bench submissions.
+    mounts: [
+      { path: "/var/run/docker.sock", from: "framework.docker" },
+    ],
 
     network: {
       endpoints: [
