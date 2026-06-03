@@ -90,12 +90,39 @@ _TIMEOUT_RECOVERY_NUDGE = (
 )
 
 
-def _looks_like_timeout(text: str) -> bool:
-    """Detect timeout signals across handlers / sandboxes."""
-    if not text:
+def _is_exec_timeout(result: str) -> bool:
+    """Deterministic check: did OUR shell_exec / python_exec / DockerWorkdir
+    just report a timeout? Matches the exact format strings produced in
+    tools.py (LocalWorkdir.shell_exec returns the bracketed form,
+    DockerWorkdir / python_exec route through _format_result which puts
+    the message in the stderr block). Won't false-positive on log file
+    content because we require the specific phrasing we ourselves emit.
+    """
+    if not result:
         return False
-    lower = text.lower()
-    return "timed out" in lower or "timeout after" in lower
+    return (
+        "[error: timed out after" in result
+        or "stderr:\ntimed out after" in result
+    )
+
+
+def _is_sandbox_timeout(exit_code: Any, stderr: str) -> bool:
+    """Deterministic check: did terminal-bench's green sandbox kill the
+    command at its per-command time limit? We trust two signals:
+      - the green's grader prints 'Command timed out after N seconds'
+        into the exec_result's stderr — this is the exact string that
+        ends up in the task_rewards error field
+      - the GNU `timeout` exit code (124) is the standard convention
+        for any sandbox that wraps the child in `timeout N ...`
+    """
+    if stderr and "Command timed out" in stderr:
+        return True
+    try:
+        if int(exit_code) == 124:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 _TOOL_OUTPUT_CHAR_BUDGET = 20_000
@@ -669,10 +696,16 @@ class Agent:
             instruction = payload.get("instruction") or raw_text
             self.history.append({"role": "user", "content": instruction})
         elif kind == "exec_result":
+            # Examine the raw fields BEFORE we merge them, so a log file
+            # echoed via stdout that contains "timed out" doesn't
+            # accidentally trigger our timeout recovery nudge.
+            raw_exit_code = payload.get("exit_code")
+            raw_stderr = payload.get("stderr", "") or ""
+            timed_out = _is_sandbox_timeout(raw_exit_code, raw_stderr)
             result_text = _truncate_tool_output(
-                f"exit_code: {payload.get('exit_code')}\n"
+                f"exit_code: {raw_exit_code}\n"
                 f"stdout:\n{payload.get('stdout', '')}\n"
-                f"stderr:\n{payload.get('stderr', '')}"
+                f"stderr:\n{raw_stderr}"
             )
             if self.pending_protocol_tool_id is None:
                 # Out-of-band exec_result; treat as user content so the
@@ -689,7 +722,7 @@ class Agent:
                     }
                 )
                 self.pending_protocol_tool_id = None
-            if _looks_like_timeout(result_text):
+            if timed_out:
                 self.history.append({
                     "role": "user",
                     "content": _TIMEOUT_RECOVERY_NUDGE,
@@ -946,7 +979,13 @@ class Agent:
                         "content": truncated,
                     }
                 )
-                if _looks_like_timeout(truncated):
+                # Only nudge when an execution tool produced our own
+                # timeout marker — never on text content tools where
+                # "timed out" could appear in legitimate output.
+                if (
+                    tc.function.name in ("shell_exec", "python_exec")
+                    and _is_exec_timeout(result)
+                ):
                     self.history.append({
                         "role": "user",
                         "content": _TIMEOUT_RECOVERY_NUDGE,
