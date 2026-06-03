@@ -74,22 +74,53 @@ async def _chat_completions_with_retry(client, *, max_attempts: int = 4, **kwarg
     """OpenRouter sometimes routes to providers that 5xx or return a
     non-JSON body (HTML error page → JSONDecodeError in the SDK). One
     bad pick shouldn't kill the whole task.
+
+    Also handles the GLM-5 "reasoning eats the completion" bug: the
+    upstream returns a 200 with finish_reason=stop, no tool_calls,
+    AND empty content (all tokens spent in the hidden reasoning
+    channel). On that pattern, retry ONCE with reasoning forcibly
+    disabled — even if it was already off, the explicit override
+    nudges OpenRouter / the provider to actually drop it. Production
+    tau2 saw this fire on ~4% of tasks even with reasoning_enabled
+    already false; this defensive retry recovers them.
     """
-    delay = 1.0
-    for attempt in range(max_attempts):
+
+    async def _one_call(call_kwargs):
+        delay = 1.0
+        for attempt in range(max_attempts):
+            try:
+                return await client.chat.completions.create(**call_kwargs)
+            except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.RateLimitError,
+                openai.InternalServerError,
+                json.JSONDecodeError,
+            ):
+                if attempt == max_attempts - 1:
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+
+    resp = await _one_call(kwargs)
+    choice = resp.choices[0]
+    msg = choice.message
+    empty_content = not (msg.content or "").strip()
+    no_tool_calls = not msg.tool_calls
+    finished_clean = choice.finish_reason == "stop"
+    if empty_content and no_tool_calls and finished_clean:
+        retry_kwargs = dict(kwargs)
+        extra = dict(retry_kwargs.get("extra_body") or {})
+        extra["reasoning"] = {"enabled": False}
+        retry_kwargs["extra_body"] = extra
         try:
-            return await client.chat.completions.create(**kwargs)
-        except (
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.RateLimitError,
-            openai.InternalServerError,
-            json.JSONDecodeError,
-        ):
-            if attempt == max_attempts - 1:
-                raise
-            await asyncio.sleep(delay)
-            delay *= 2
+            retry_resp = await _one_call(retry_kwargs)
+        except Exception:
+            return resp  # original at least has a parseable shape
+        retry_msg = retry_resp.choices[0].message
+        if (retry_msg.content or "").strip() or retry_msg.tool_calls:
+            return retry_resp
+    return resp
 
 
 # ---------------------------------------------------------------------------
