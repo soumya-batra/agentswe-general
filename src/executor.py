@@ -36,12 +36,16 @@ class Executor(AgentExecutor):
             raise ServerError(error=InvalidRequestError(message="Missing message in request"))
 
         # Peek-classify the message to detect CAR-bench, which uses a
-        # Message-only response model (no Task lifecycle). Once a context
-        # is established as car_bench it stays car_bench (sticky).
+        # Message-only response model (no Task lifecycle). Sticky:
+        # if this context already has an agent with a handler set,
+        # USE that handler — never reclassify mid-conversation. That
+        # protects every other benchmark from a future turn whose
+        # text or payload coincidentally matches another handler's
+        # signature.
         ctx_id_from_msg = getattr(msg, "context_id", None) or ""
         existing_agent = self.agents.get(ctx_id_from_msg) if ctx_id_from_msg else None
-        if existing_agent and existing_agent.handler == "car_bench":
-            handler_hint = "car_bench"
+        if existing_agent and existing_agent.handler:
+            handler_hint = existing_agent.handler
         else:
             payload_peek, raw_text_peek = extract_payload(msg)
             handler_hint = classify(payload_peek, raw_text_peek)

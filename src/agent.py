@@ -141,12 +141,14 @@ def classify(payload: Any, raw_text: str = "") -> str:
         # CAR-bench: green sends a DataPart containing tool schemas or
         # tool_results, paired with a TextPart for the user utterance.
         # Distinguish from pi-bench by the absence of a `messages` field.
+        # NOTE: we deliberately do NOT also fall back to a raw-text
+        # "System:\\n...\\n\\nUser:" marker. CAR-bench always emits the
+        # DataPart with `tools` on first turn (verified against the
+        # reference baseline), so the dict check is sufficient. A text
+        # fallback risks false-positive routing of tau2 first turns
+        # that happen to contain both phrases in their policy text.
         if "tools" in payload or "tool_results" in payload:
             return "car_bench"
-    # First-turn CAR-bench can ALSO arrive as plain text containing the
-    # "System:\n...\n\nUser:" marker when the DataPart is empty.
-    if "System:" in raw_text and "\n\nUser:" in raw_text:
-        return "car_bench"
     return "generic"
 
 
