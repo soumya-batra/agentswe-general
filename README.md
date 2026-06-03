@@ -1,46 +1,71 @@
-# A2A Agent Template
+# agentswe-general
 
-A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) agents.
+**A single general-purpose A2A agent for AgentBeats Sprint 4, evaluated across five benchmarks in five distinct categories.**
 
-## Project Structure
+## Abstract
+
+This is our Sprint 4 entry: one purple agent that adapts to substantially different task types — coding, conversational policy, financial document question-answering, agentic safety, and computer-use navigation — without per-benchmark code paths, prompt hardcoding, or look-up tables. The same Docker image, the same model, and the same reasoning loop handle every category. What changes from one benchmark to another is only the thin adapter that translates the green agent's wire protocol into and out of our shared ReAct loop.
+
+## What's inside
+
+The agent runs a single tool-use loop powered by `z-ai/glm-5` via OpenRouter — a deliberate choice for cost efficiency that lets us complete a full five-benchmark evaluation for under thirty dollars. The model has access to a fixed tool surface: a shell, a Python interpreter, file I/O, web search and fetching, working-memory tooling, and optional document retrieval.
+
+### Working memory (scratchpad)
+
+We give the model an explicit scratchpad in which it accumulates short, structured entries it will need to reference later — facts, plans, constraints, decisions, blockers, and completed steps — using suggested prefixes such as `[FINDING: ...]`, `[PLAN: ...]`, `[CONSTRAINT: ...]`. The scratchpad is soft-capped and injected at the top of every turn so it survives history truncation. The model interacts with it through a dedicated `note` tool when tool calling is enabled, or through inline markup tags (`[NOTE-ADD: ...]`, `[NOTE-REMOVE: ...]`) when the deployment is configured tool-less — necessary for benchmarks whose green agent injects its own task-specific tool surface into the system prompt and requires us to keep ours hidden.
+
+### Recursive in-agent interpreter
+
+Beyond the scratchpad, the agent has a persistent in-process Python interpreter exposed via a `repl` tool. The interpreter has, in scope, the **untruncated** record of every prior shell command, every prior tool result, and every prior repl execution from this conversation. This lets the model slice, search, regex-match, JSON-parse, and summarise long outputs server-side, without re-running the underlying shell command or paying the token cost of re-reading raw outputs into its window. Combined with the scratchpad and a sandbox-side history file, this gives a single mid-tier model the ability to sustain coherent long-horizon work across many tool calls, turning context length from a fixed constraint into something the agent actively manages.
+
+### Retrieval-augmented generation
+
+For document-grounded benchmarks (currently OfficeQA), retrieval is enabled by a `retrieval_enabled` configuration flag. The document chunks are baked into the Docker image — not architecturally ideal, but a pragmatic choice given that leaderboard infrastructure cannot reliably download multi-gigabyte corpora at agent startup without timing out. Retrieval combines BM25 (lexical) and FAISS embeddings (Qwen3-Embedding-8B, semantic) and fuses the two ranked lists using **reciprocal rank fusion**. Beyond the top-k context that is pre-retrieved for the user's initial question, retrieval is also exposed to the model as a `retrieve_documents` tool, so it can issue more specific follow-up queries mid-solution (narrower years, named entities, exact figures) when the initial passages do not pin down the answer.
+
+### Routing by message shape, not benchmark identity
+
+The agent dispatches incoming messages by their **structure**, not their benchmark identity. A payload declaring a specific A2A protocol header is routed to the terminal-shell handler; a payload shaped like an OpenAI chat completion is forwarded as such; a coding-style payload bearing a Docker image and a problem statement is routed to the patch-generation flow; everything else falls through to a general handler. This routing is content-based and benchmark-agnostic: nowhere in the codebase does the agent ask "which benchmark am I in?".
+
+## Results
+
+| Benchmark | Category | Score |
+|---|---|---|
+| Terminal Bench 2.0 | Coding | 34 / 89 |
+| τ²-Bench | τ² | 34 / 50 |
+| OfficeQA | Finance | 114 / 246 |
+| Pi-Bench | Agent Safety | 78.9 *(lower is better)* |
+| CAR-bench | Computer Use & Web | 0.64 |
+
+Five working benchmarks across five distinct AgentBeats categories — comfortably above the Sprint 4 eligibility floor of five greens in three categories.
+
+## Cost
+
+A full Terminal Bench sweep over all 89 tasks costs in the order of a few dollars at current GLM-5 prices; the other benchmarks are cheaper. The complete five-benchmark evaluation runs under USD 30, which matters when iteration is the bottleneck.
+
+## Repository layout
 
 ```
 src/
-├─ server.py      # Server setup and agent card configuration
-├─ executor.py    # A2A request handling
-├─ agent.py       # Your agent implementation goes here
-└─ messenger.py   # A2A messaging utilities
-tests/
-└─ test_agent.py  # Agent tests
-Dockerfile            # Docker configuration
-pyproject.toml        # Python dependencies
-amber-manifest.json5  # Amber manifest
-.github/
-└─ workflows/
-   └─ test-and-publish.yml # CI workflow
+├─ server.py        # A2A server + agent card configuration
+├─ executor.py      # A2A request handling
+├─ agent.py         # ReAct loop, handlers, working memory, retrieval
+├─ tools.py         # Tool schemas and dispatch (shell, python, web, files, note, repl, retrieval)
+├─ llm.py           # OpenRouter client + config-flag accessors
+└─ messenger.py     # A2A messaging utilities
+amber-manifest.json5  # Deployment manifest
+Dockerfile            # Multi-stage build with baked-in corpus
+tools/                # Local reproduction harnesses + trace renderer
+tests/                # A2A conformance tests
 ```
 
-## Getting Started
-
-1. **Create your repository** - Click "Use this template" to create your own repository from this template
-
-2. **Implement your agent** - Add your agent logic to [`src/agent.py`](src/agent.py)
-
-3. **Configure your agent card** - Fill in your agent's metadata (name, skills, description) in [`src/server.py`](src/server.py)
-
-4. **Fill out your [Amber](https://github.com/RDI-Foundation/amber) manifest** - Update [`amber-manifest.json5`](amber-manifest.json5) to use your agent in Amber scenarios
-
-5. **Write your tests** - Add custom tests for your agent in [`tests/test_agent.py`](tests/test_agent.py)
-
-For a concrete example of implementing an agent using this template, see this [draft PR](https://github.com/RDI-Foundation/agent-template/pull/8).
-
-## Running Locally
+## Running locally
 
 ```bash
 # Install dependencies
 uv sync
 
 # Run the server
+export OPENROUTER_API_KEY=sk-or-...
 uv run src/server.py
 ```
 
@@ -48,43 +73,33 @@ uv run src/server.py
 
 ```bash
 # Build the image
-docker build -t my-agent .
+docker build -t agentswe-general .
 
 # Run the container
-docker run -p 9009:9009 my-agent
+docker run -p 9010:9010 -e OPENROUTER_API_KEY=sk-or-... agentswe-general
 ```
+
+## Configuration
+
+Per-deployment toggles are declared in `amber-manifest.json5` and read from environment variables at runtime:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | *(required)* | OpenAI-compatible inference endpoint |
+| `MODEL_NAME` | `z-ai/glm-5` | Chat model |
+| `TOOLS_ENABLED` | `false` | Master switch for our tool surface — turn off when the green provides its own tool API in the prompt |
+| `JSON_OUTPUT` | `false` | Force JSON object responses — used by τ² |
+| `REASONING_ENABLED` | `true` | Allow the model's hidden reasoning channel |
+| `RETRIEVAL_ENABLED` | `false` | Expose the baked-in document corpus through `retrieve_documents` |
+| `TAVILY_API_KEY` | empty | Enables `web_search` when set |
 
 ## Testing
 
-Run A2A conformance tests against your agent.
-
 ```bash
-# Install test dependencies
 uv sync --extra test
-
-# Start your agent (uv or docker; see above)
-
-# Run tests against your running agent URL
-uv run pytest --agent-url http://localhost:9009
+uv run pytest --agent-url http://localhost:9010
 ```
 
-## Publishing
+## Acknowledgments
 
-The repository includes a GitHub Actions workflow that automatically builds, tests, and publishes a Docker image of your agent to GitHub Container Registry.
-
-If your agent needs API keys or other secrets, add them in Settings → Secrets and variables → Actions → Repository secrets. They'll be available as environment variables during CI tests.
-
-- **Push to `main`** → publishes `latest` tag:
-```
-ghcr.io/<your-username>/<your-repo-name>:latest
-```
-
-- **Create a git tag** (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → publishes version tags:
-```
-ghcr.io/<your-username>/<your-repo-name>:1.0.0
-ghcr.io/<your-username>/<your-repo-name>:1
-```
-
-Once the workflow completes, find your Docker image in the Packages section (right sidebar of your repository). Configure the package visibility in package settings.
-
-> **Note:** Organization repositories may need package write permissions enabled manually (Settings → Actions → General). Version tags must follow [semantic versioning](https://semver.org/) (e.g., `v1.0.0`).
+Built on the [RDI-Foundation/agent-template](https://github.com/RDI-Foundation/agent-template). Evaluated through the AgentBeats platform across five green agents.
