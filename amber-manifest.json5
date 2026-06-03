@@ -1,12 +1,11 @@
 {
   manifest_version: "0.1.0",
 
-  // The `framework.docker` mount below requires the `docker` experimental
-  // feature on newer amber-cli (SWE-bench / terminal-bench). Older
-  // amber-cli (v0, used by tau2 / pi-bench / CAR-bench leaderboards)
-  // rejects this field — comment it out for those submissions, alongside
-  // re-commenting `slots.docker` and `program.mounts` below.
-  experimental_features: ["docker"],
+  // UNCOMMENT before submitting to SWE-bench or terminal-bench (their
+  // newer amber-cli requires this feature for the `framework.docker`
+  // mount). Older amber-cli (v0, used by tau2 / pi-bench / CAR-bench
+  // leaderboards) rejects this field — keep commented for those.
+  // experimental_features: ["docker"],
 
   config_schema: {
     type: "object",
@@ -60,13 +59,13 @@
     additionalProperties: false,
   },
 
-  // Docker slot — required by SWE-bench and terminal-bench (their
-  // newer amber-cli supports it). Keep commented for tau2 / pi-bench /
-  // CAR-bench leaderboards running amber-cli v0, which doesn't know
-  // the `docker` slot kind.
-  slots: {
-    docker: { kind: "docker", optional: true },
-  },
+  // UNCOMMENT before submitting to SWE-bench or terminal-bench (their
+  // newer amber-cli supports docker slots). Leave commented for tau2 /
+  // pi-bench / CAR-bench leaderboards running amber-cli v0, which
+  // doesn't know the `docker` slot kind.
+  // slots: {
+  //   docker: { kind: "docker", optional: true },
+  // },
 
   program: {
     image: "ghcr.io/soumya-batra/agentswe-general:latest",
@@ -87,11 +86,11 @@
       FAISS_INDEX_DIR: "/app/faiss_index",
     },
 
-    // Mount paired with the slots.docker declaration above. Comment
-    // back out for tau2 / pi-bench / CAR-bench submissions.
-    mounts: [
-      { path: "/var/run/docker.sock", from: "framework.docker" },
-    ],
+    // UNCOMMENT alongside the slots.docker declaration above when
+    // submitting to SWE-bench / terminal-bench.
+    // mounts: [
+    //   { path: "/var/run/docker.sock", from: "framework.docker" },
+    // ],
 
     network: {
       endpoints: [
