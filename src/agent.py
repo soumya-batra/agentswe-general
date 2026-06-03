@@ -49,6 +49,55 @@ from tools import (
 )
 
 
+def _args_dict(raw: str | None) -> dict[str, Any]:
+    """Parse a tool_call's `arguments` field to a dict.
+
+    The OpenAI SDK gives us `tc.function.arguments` as a string. Models
+    occasionally emit a non-object JSON (list, scalar, null) — when that
+    hits a downstream `args.get(...)` we get
+        'list' object has no attribute 'get'
+    and the whole task fails. Defensively coerce anything non-dict to
+    an empty dict.
+    """
+    try:
+        parsed = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+# Generic recovery instructions injected as a follow-up user turn
+# whenever a tool result contains "timed out". The model frequently
+# retries the same synchronous long-running command and gets killed
+# again; this nudge tells it to background the work and poll on
+# later turns. Applies to any handler that ingests tool results
+# (terminal-bench's per-command sandbox limit, our own LocalWorkdir
+# / DockerWorkdir timeouts, etc.) — not benchmark-specific.
+_TIMEOUT_RECOVERY_NUDGE = (
+    "[execution-time-limit] The previous command exceeded the "
+    "execution time limit and was killed. Do NOT retry the same "
+    "command synchronously — it will time out again.\n\n"
+    "For long-running work, background it and poll across separate "
+    "turns:\n\n"
+    "    nohup CMD > /tmp/job.log 2>&1 &\n"
+    "    echo $!         # capture the PID\n\n"
+    "Then on a LATER turn check progress:\n"
+    "    tail -n 50 /tmp/job.log\n"
+    "    ps -p <PID> > /dev/null && echo running || echo done\n"
+    "    cat /tmp/job.log   # full output when done\n\n"
+    "Re-running the same synchronous command is forbidden. Background "
+    "it, then poll progress on the next turn."
+)
+
+
+def _looks_like_timeout(text: str) -> bool:
+    """Detect timeout signals across handlers / sandboxes."""
+    if not text:
+        return False
+    lower = text.lower()
+    return "timed out" in lower or "timeout after" in lower
+
+
 _TOOL_OUTPUT_CHAR_BUDGET = 20_000
 
 
@@ -570,10 +619,7 @@ class Agent:
         if msg.tool_calls:
             flat_calls: list[dict[str, Any]] = []
             for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                args = _args_dict(tc.function.arguments)
                 flat_calls.append({
                     "tool_name": tc.function.name,
                     "arguments": args,
@@ -643,6 +689,11 @@ class Agent:
                     }
                 )
                 self.pending_protocol_tool_id = None
+            if _looks_like_timeout(result_text):
+                self.history.append({
+                    "role": "user",
+                    "content": _TIMEOUT_RECOVERY_NUDGE,
+                })
         else:
             await self._send_protocol_message(
                 updater,
@@ -669,10 +720,7 @@ class Agent:
 
         if paused:
             tc = paused[0]
-            try:
-                args = json.loads(tc["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {}
+            args = _args_dict(tc.get("arguments"))
             self.pending_protocol_tool_id = tc["id"]
             if tc["name"] == "python_exec":
                 command = f"python3 -c {shlex.quote(args.get('code', ''))}"
@@ -886,20 +934,23 @@ class Agent:
             )
 
             for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                args = _args_dict(tc.function.arguments)
                 result = await tool_dispatch(
                     tc.function.name, args, workdir=workdir
                 )
+                truncated = _truncate_tool_output(result)
                 self.history.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": _truncate_tool_output(result),
+                        "content": truncated,
                     }
                 )
+                if _looks_like_timeout(truncated):
+                    self.history.append({
+                        "role": "user",
+                        "content": _TIMEOUT_RECOVERY_NUDGE,
+                    })
 
         return (
             "[ran out of tool-use steps; returning best partial answer]\n"
