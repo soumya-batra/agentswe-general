@@ -1,9 +1,12 @@
 {
   manifest_version: "0.1.0",
 
-  // Docker support is enabled via `slots.docker` + the framework.docker
-  // mount below. Some amber-cli versions (e.g. v0 on tau2's leaderboard)
-  // reject an `experimental_features` field, so we don't declare one.
+  // The `framework.docker` mount below requires the `docker` experimental
+  // feature on newer amber-cli (SWE-bench / terminal-bench). Older
+  // amber-cli (v0, used by tau2 / pi-bench / CAR-bench leaderboards)
+  // rejects this field — comment it out for those submissions, alongside
+  // re-commenting `slots.docker` and `program.mounts` below.
+  experimental_features: ["docker"],
 
   config_schema: {
     type: "object",
