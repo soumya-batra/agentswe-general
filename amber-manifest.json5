@@ -66,7 +66,7 @@
   // },
 
   program: {
-    image: "ghcr.io/soumya-batra/agentswe-general:latest",
+    image: "ghcr.io/soumya-batra/agentswe-general:repl-tool",
     entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9010",
 
     env: {
