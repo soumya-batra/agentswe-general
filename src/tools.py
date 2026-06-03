@@ -202,8 +202,40 @@ RETRIEVE_DOCUMENTS = {
 }
 
 
+REPL = {
+    "type": "function",
+    "function": {
+        "name": "repl",
+        "description": (
+            "Run Python code in a PERSISTENT in-agent interpreter that "
+            "survives across every turn of this conversation. The `context` "
+            "variable (list[dict]) is in scope: it contains every shell "
+            "command + result and every prior repl execution, UNTRUNCATED. "
+            "Use this to inspect or search long outputs the chat preview "
+            "truncated, extract specific lines, or compute over prior "
+            "results — WITHOUT re-running the underlying shell commands. "
+            "Anything printed to stdout is returned. Examples: "
+            "`print(context[-1]['stdout'][:5000])`, "
+            "`[c['command'] for c in context if c['kind']=='shell']`."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python source. Use print(...) to return results."
+                    ),
+                },
+            },
+            "required": ["code"],
+        },
+    },
+}
+
+
 GENERIC_TOOL_SCHEMAS = [
-    WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE
+    WEB_SEARCH, WEB_FETCH, SHELL_EXEC, PYTHON_EXEC, READ_FILE, WRITE_FILE, REPL
 ]
 
 

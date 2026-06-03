@@ -20,9 +20,12 @@ lookups. We don't do that.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import shlex
 import tempfile
+import traceback
 from typing import Any
 
 import openai
@@ -281,6 +284,24 @@ Guidelines:
   recursive searches, package installs), narrow the scope, set explicit
   timeouts (`timeout 25 ...`), or run in the background (`nohup ... &`)
   and check results in a later step.
+
+WORKING MEMORY (Recursive LM scratchpad):
+If a `repl` tool is available, you have a persistent in-agent Python
+interpreter with a `context` variable (a list, accumulated across all
+turns of this conversation) that records every shell command + result
+and every prior repl execution. The full untruncated outputs live there.
+The chat history you see contains TRUNCATED previews of bash/repl
+outputs to save tokens. When you need to inspect a full output, look it
+up via repl, e.g.:
+
+    print(context[-1]['stdout'][:5000])
+    [c['command'] for c in context if c['kind'] == 'shell']
+    for c in context:
+        if 'error' in (c.get('stderr') or '').lower():
+            print(c.get('command'))
+
+Use `repl` for ANY task that needs to slice, search, or summarize
+long outputs from earlier steps without re-running the shell command.
 """
 
 
@@ -307,11 +328,50 @@ class Agent:
         # map incoming tool_results back to their tool_call_id by name.
         self._car_bench_tools: list[dict[str, Any]] | None = None
         self._car_bench_pending_tool_calls: list[dict[str, Any]] | None = None
+        # RLM scratchpad: untruncated record of every shell/repl execution
+        # across all A2A turns in this conversation. Lives in the agent's
+        # process; the model reads it via the `repl` tool. The list is
+        # shared with `_repl_globals['context']` so model-side mutations
+        # are visible everywhere.
+        self.context: list[dict[str, Any]] = []
+        self._repl_globals: dict[str, Any] | None = None
+        # Most recent exec_request command, so we can record it alongside
+        # the matching exec_result in `context`.
+        self._last_request_command: str | None = None
 
     def workdir(self) -> Workdir:
         if self._workdir is None:
             self._workdir = LocalWorkdir(tempfile.mkdtemp(prefix="agentswe-"))
         return self._workdir
+
+    def _init_repl(self) -> None:
+        # Hand the model the SAME list object that lives on the Agent, so
+        # appends from the dispatch path (shell exec_result, repl call)
+        # are visible inside the interpreter on subsequent invocations.
+        self._repl_globals = {
+            "__builtins__": __builtins__,
+            "context": self.context,
+        }
+
+    def _exec_repl(self, code: str) -> str:
+        if self._repl_globals is None:
+            self._init_repl()
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                exec(code, self._repl_globals)
+        except Exception:
+            traceback.print_exc(file=buf_err)
+        stdout = buf_out.getvalue()
+        stderr = buf_err.getvalue()
+        self.context.append({
+            "kind": "repl",
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+        return f"stdout:\n{stdout}\nstderr:\n{stderr}"
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
         payload, raw_text = extract_payload(message)
@@ -700,11 +760,23 @@ class Agent:
             # echoed via stdout that contains "timed out" doesn't
             # accidentally trigger our timeout recovery nudge.
             raw_exit_code = payload.get("exit_code")
+            raw_stdout = payload.get("stdout", "") or ""
             raw_stderr = payload.get("stderr", "") or ""
             timed_out = _is_sandbox_timeout(raw_exit_code, raw_stderr)
+            # RLM scratchpad: record the full untruncated exec_result so
+            # the model can inspect it later via the `repl` tool without
+            # paying the truncated-history token cost.
+            self.context.append({
+                "kind": "shell",
+                "command": self._last_request_command,
+                "exit_code": raw_exit_code,
+                "stdout": raw_stdout,
+                "stderr": raw_stderr,
+            })
+            self._last_request_command = None
             result_text = _truncate_tool_output(
                 f"exit_code: {raw_exit_code}\n"
-                f"stdout:\n{payload.get('stdout', '')}\n"
+                f"stdout:\n{raw_stdout}\n"
                 f"stderr:\n{raw_stderr}"
             )
             if self.pending_protocol_tool_id is None:
@@ -759,6 +831,9 @@ class Agent:
                 command = f"python3 -c {shlex.quote(args.get('code', ''))}"
             else:
                 command = args.get("command", "")
+            # Stash so the next exec_result we ingest can be paired with
+            # the command that produced it in `context`.
+            self._last_request_command = command
             await self._send_protocol_message(
                 updater,
                 {
@@ -968,9 +1043,16 @@ class Agent:
 
             for tc in msg.tool_calls:
                 args = _args_dict(tc.function.arguments)
-                result = await tool_dispatch(
-                    tc.function.name, args, workdir=workdir
-                )
+                # `repl` runs in the agent's own process against the RLM
+                # scratchpad (`self.context`), not in the benchmark
+                # workdir. tool_dispatch has no agent-state access, so
+                # we handle it inline.
+                if tc.function.name == "repl":
+                    result = self._exec_repl(args.get("code", ""))
+                else:
+                    result = await tool_dispatch(
+                        tc.function.name, args, workdir=workdir
+                    )
                 truncated = _truncate_tool_output(result)
                 self.history.append(
                     {
