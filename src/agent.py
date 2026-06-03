@@ -371,6 +371,14 @@ You are a general-purpose AI agent participating in benchmark evaluations
 over the A2A protocol. You may receive tasks of any kind: question
 answering, coding, web research, multi-turn dialogue, policy decisions.
 
+## Persistent affordances (available across turns)
+- **Working notes** — short one-line entries you can save with the
+  `note` tool (when available) or `[NOTE-ADD: <text>]` markup. They
+  persist across turns under the "# Working notes" block.
+- **History log** — every tool call and result is auto-appended to
+  `/tmp/.agent/history.jsonl` in your sandbox shell. Grep / tail / jq
+  it like any other file.
+
 Guidelines:
 - Read the task carefully. If a specific OUTPUT FORMAT is requested
   (XML tags, JSON, a patch/diff, a tool call), follow it EXACTLY.
@@ -410,65 +418,40 @@ If a user request could refer to multiple distinct entities (e.g. "the
 reading light" when there are several seats, "the window" when several
 are open), ASK which one rather than guessing or applying to all.
 Over-acting on ambiguity is a common failure mode.
-
-## Conversation history file
-Your previous turns (your tool calls and their results) are appended to
-`/tmp/.agent/history.jsonl` inside your sandbox shell. When context
-gets long and you need to recall an earlier finding, grep / cat that
-file instead of re-running discovery commands. Example:
-  grep -i "window_driver_position" /tmp/.agent/history.jsonl
-  tail -n 5 /tmp/.agent/history.jsonl
-Each line is a JSON object with fields `turn`, `kind`
-(`task` | `tool_call` | `tool_result`), `name`, and `text`.
-
-## Working memory (notes)
-You have a working memory that PERSISTS across turns and is injected
-at the TOP of every turn under "# Working notes". Use it to commit
-short one-line entries you'll need to reference later. Suggested
-prefixes (use what fits, invent your own only if needed):
-  [CONSTRAINT: ...]    — a rule/policy that must be obeyed
-  [FINDING: ...]       — a discovery (file path, value, fact)
-  [DECISION: ...]      — a decision you made + the reason
-  [PLAN: ...]          — your next step(s)
-  [BLOCKED-ON: ...]    — what's blocking you
-  [DONE: ...]          — a completed step
-
-How to add notes:
-- If you have a `note` tool available, call it: `note(action="add", text="...")`.
-- Otherwise, emit `[NOTE-ADD: <text>]` anywhere in your response. It
-  will be stripped before downstream parsing.
-To remove: tool `note(action="remove", text="n3")` or `[NOTE-REMOVE: n3]`.
-
-BEFORE each tool call or final answer, scan the existing notes. Do not
-contradict a CONSTRAINT, repeat a DONE step, or re-discover a FINDING.
-Keep notes SHORT (one line). Only commit things you will need later —
-don't narrate the obvious.
 """
 
 
 _NOTES_TOOL_INSTRUCTION_TEXT = (
-    "## Working memory (notes)\n"
-    "You have a working memory that persists across turns and is "
-    "injected at the TOP of every turn under '# Working notes'. Use "
-    "it to commit short one-line entries you will need later.\n\n"
-    "Suggested prefixes (use what fits): [CONSTRAINT: ...], "
-    "[FINDING: ...], [DECISION: ...], [PLAN: ...], [BLOCKED-ON: ...], "
-    "[DONE: ...].\n\n"
-    "To ADD a note: emit `[NOTE-ADD: <text>]` anywhere in your "
-    "response. It will be stripped from the response your caller "
-    "sees but stored in your working memory.\n"
-    "To REMOVE a note: emit `[NOTE-REMOVE: n3]` (use the n<id> shown "
-    "next to each note).\n\n"
-    "BEFORE each action or final answer, scan your existing notes. "
-    "Do not contradict a CONSTRAINT, repeat a DONE step, or "
-    "re-discover a FINDING. Keep notes SHORT (one line). Only commit "
-    "things you will reference later."
+    "## Inline-markup affordances (tools-disabled handler)\n"
+    "You do not have access to the `note` tool or to a shell here, "
+    "but two text-markup channels are available — emit them anywhere "
+    "in your response; we strip them before forwarding.\n\n"
+    "**Working notes** — `[NOTE-ADD: <text>]` to save a short one-line "
+    "entry that persists across turns under the '# Working notes' "
+    "block. `[NOTE-REMOVE: n3]` to drop note n3. Suggested prefixes "
+    "inside the text: [CONSTRAINT: ...], [FINDING: ...], "
+    "[DECISION: ...], [PLAN: ...], [BLOCKED-ON: ...], [DONE: ...].\n\n"
+    "**History grep** — `[HISTORY-GREP: <pattern>]` to search past "
+    "tool calls and results from this conversation by substring "
+    "(case-insensitive, matched against the `text` and `name` "
+    "fields). When you emit this we run the lookup, prepend the "
+    "matches as a system message, and re-call you so you can act on "
+    "the results in the same turn."
 )
 
 
 _NOTES_TAG_ADD = re.compile(r"\[NOTE-ADD:\s*(.*?)\]", re.DOTALL)
 _NOTES_TAG_REMOVE = re.compile(r"\[NOTE-REMOVE:\s*n(\d+)\s*\]")
 _NOTES_SOFT_CAP = 50
+
+# History-grep markup for tools-disabled handlers. The model emits
+# `[HISTORY-GREP: <pattern>]` in its response; we strip it before
+# forwarding, run the lookup against in-memory _history_log, and
+# inject matches as a system message so the model can react in-turn.
+_HISTORY_GREP_TAG = re.compile(r"\[HISTORY-GREP:\s*(.*?)\]", re.DOTALL)
+# Cap how many in-turn recursive LLM calls we'll do to resolve grep
+# markup; protects against a model that emits a grep on every retry.
+_HISTORY_GREP_MAX_INNER_TURNS = 3
 
 
 class Agent:
@@ -533,17 +516,29 @@ class Agent:
             else f"[note: no n{target_id} to remove]"
         )
 
-    def _notes_system_message(self) -> dict[str, str] | None:
-        if not self._notes:
-            return None
-        lines = "\n".join(f"[n{i}] {t}" for i, t in self._notes)
+    def _notes_system_message(self) -> dict[str, str]:
+        """Inject the working-notes block every turn so the affordance
+        stays visible. When empty, just show the (empty) header without
+        nagging — model uses notes if useful, not on every turn."""
+        if self._notes:
+            body = "\n".join(f"[n{i}] {t}" for i, t in self._notes)
+            footer = (
+                "Scan these before your next action; do not contradict, "
+                "repeat, or rediscover them."
+            )
+        else:
+            body = "(empty)"
+            footer = (
+                "Available via the `note` tool or `[NOTE-ADD: <text>]` "
+                "markup if you need to anchor a constraint, finding, or "
+                "decision across many turns."
+            )
         return {
             "role": "system",
             "content": (
                 "# Working notes (carry-forward across turns):\n"
-                + lines
-                + "\nScan these BEFORE your next action; do not "
-                "contradict, repeat, or rediscover them."
+                + body
+                + "\n" + footer
             ),
         }
 
@@ -573,6 +568,48 @@ class Agent:
         _trace("history_append", entry=entry)
         return entry
 
+    # Context-size threshold (chars) above which we surface the
+    # history reminder. ~50 KB ≈ ~12 K tokens — by this point the
+    # conversation is genuinely long enough that grep-instead-of-recall
+    # starts paying off, and earlier turns are at real risk of falling
+    # out of effective attention.
+    _HISTORY_REMINDER_CHAR_THRESHOLD = 50_000
+
+    def _context_size_estimate(self) -> int:
+        """Rough char-count of self.history. Used to decide whether to
+        surface the history-file reminder; short tasks shouldn't see
+        it (avoids compulsive grepping)."""
+        total = 0
+        for m in self.history:
+            if not isinstance(m, dict):
+                continue
+            c = m.get("content")
+            if c:
+                total += len(str(c))
+            for tc in m.get("tool_calls") or []:
+                args = tc.get("function", {}).get("arguments", "")
+                total += len(str(args))
+        return total
+
+    def _history_system_message(self) -> dict[str, str] | None:
+        """Per-turn status reminder of the history file — surfaced only
+        once context has grown enough that the static-prompt mention
+        may be buried. Tells the model the context is large so it knows
+        why the reminder is appearing now; doesn't prescribe behavior."""
+        if self._context_size_estimate() < self._HISTORY_REMINDER_CHAR_THRESHOLD:
+            return None
+        n = len(self._history_log)
+        return {
+            "role": "system",
+            "content": (
+                "# Heads-up: this conversation has grown long — earlier "
+                "turns may be slipping out of effective attention. "
+                f"History log at /tmp/.agent/history.jsonl has {n} "
+                "entries (one JSON line per turn) if you need to recall "
+                "anything."
+            ),
+        }
+
     def _history_jsonl_preface(self) -> str:
         """Shell command that writes the LATEST history entry to the
         sandbox's /tmp/.agent/history.jsonl, used by terminal-bench
@@ -589,6 +626,51 @@ class Agent:
             "mkdir -p /tmp/.agent >/dev/null 2>&1; "
             f"echo {b64} | base64 -d >> /tmp/.agent/history.jsonl 2>/dev/null; "
         )
+
+    def _history_grep(self, pattern: str, limit: int = 20) -> str:
+        """Substring search (case-insensitive) over _history_log. Matches
+        on the `text` and `name` fields. Returns a short, line-formatted
+        result string."""
+        if not pattern:
+            return "[history-grep: empty pattern]"
+        p = pattern.lower()
+        hits = [
+            e for e in self._history_log
+            if p in str(e.get("text", "")).lower()
+            or p in str(e.get("name", "")).lower()
+        ]
+        if not hits:
+            return (
+                f"[history-grep '{pattern}': 0 matches in "
+                f"{len(self._history_log)} entries]"
+            )
+        show = hits[-limit:]
+        lines = [
+            f"[history-grep '{pattern}': {len(hits)} match(es), "
+            f"showing latest {len(show)}]"
+        ]
+        for e in show:
+            text = str(e.get("text", ""))[:300].replace("\n", "\\n")
+            lines.append(
+                f"  turn={e.get('turn')} kind={e.get('kind')} "
+                f"name={e.get('name','-')} text={text}"
+            )
+        return "\n".join(lines)
+
+    def _extract_text_history_grep(
+        self, content: str | None
+    ) -> tuple[str, list[str]]:
+        """Pull [HISTORY-GREP: <pattern>] markers out of free-form text,
+        return (cleaned_content, list_of_patterns)."""
+        if not content:
+            return content or "", []
+        patterns = [
+            m.strip() for m in _HISTORY_GREP_TAG.findall(content)
+            if m.strip()
+        ]
+        cleaned = _HISTORY_GREP_TAG.sub("", content)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, patterns
 
     def _extract_text_notes(self, content: str | None) -> str:
         """Pull [NOTE-ADD: ...] / [NOTE-REMOVE: nK] markup out of
@@ -790,10 +872,7 @@ class Agent:
         # scratch it can write to via [NOTE-ADD: ...] markup.
         notes_msg = self._notes_system_message()
         notes_instr = {"role": "system", "content": _NOTES_TOOL_INSTRUCTION_TEXT}
-        prefix: list[dict[str, Any]] = []
-        if notes_msg:
-            prefix.append(notes_msg)
-        prefix.append(notes_instr)
+        prefix: list[dict[str, Any]] = [notes_msg, notes_instr]
         messages = prefix + list(messages)
 
         kwargs: dict[str, Any] = {
@@ -815,9 +894,32 @@ class Agent:
         choice = resp.choices[0]
         msg = choice.message
 
-        # Strip and store any [NOTE-ADD/-REMOVE] markup the model
-        # emitted in content BEFORE forwarding to pi-bench's parser.
+        # In-turn [HISTORY-GREP: ...] resolution: if the model emitted
+        # grep markup, run the lookup against _history_log and re-call
+        # the LLM with the matches as a system message so it can act
+        # on them in the same A2A turn. Bounded to avoid runaway.
+        for _ in range(_HISTORY_GREP_MAX_INNER_TURNS):
+            _, patterns = self._extract_text_history_grep(msg.content)
+            if not patterns:
+                break
+            grep_blocks = [self._history_grep(p) for p in patterns]
+            _trace(
+                "history_grep_resolved",
+                handler="openai_passthrough",
+                patterns=patterns,
+                blocks=grep_blocks,
+            )
+            kwargs["messages"] = list(kwargs["messages"]) + [
+                {"role": "assistant", "content": msg.content or ""},
+                {"role": "system", "content": "\n\n".join(grep_blocks)},
+            ]
+            resp = await _chat_completions_with_retry(self.client, **kwargs)
+            msg = resp.choices[0].message
+
+        # Strip and store any [NOTE-ADD/-REMOVE] AND any remaining
+        # [HISTORY-GREP: ...] markup before forwarding to pi-bench.
         cleaned_content = self._extract_text_notes(msg.content)
+        cleaned_content, _ = self._extract_text_history_grep(cleaned_content)
 
         # Build the response payload pi-bench's purple_adapter understands.
         # Its _part_to_pi_msg expects tool_calls as a flat list of
@@ -950,17 +1052,9 @@ class Agent:
         notes_msg = self._notes_system_message()
         notes_instr = {"role": "system", "content": _NOTES_TOOL_INSTRUCTION_TEXT}
         if self.history and self.history[0].get("role") == "system":
-            prefix: list[dict[str, Any]] = [self.history[0]]
-            if notes_msg:
-                prefix.append(notes_msg)
-            prefix.append(notes_instr)
-            messages = prefix + self.history[1:]
+            messages = [self.history[0], notes_msg, notes_instr] + self.history[1:]
         else:
-            prefix = []
-            if notes_msg:
-                prefix.append(notes_msg)
-            prefix.append(notes_instr)
-            messages = prefix + list(self.history)
+            messages = [notes_msg, notes_instr] + list(self.history)
 
         kwargs: dict[str, Any] = {
             "model": model_name(),
@@ -975,6 +1069,34 @@ class Agent:
 
         resp = await _chat_completions_with_retry(self.client, **kwargs)
         msg = resp.choices[0].message
+
+        # In-turn [HISTORY-GREP: ...] resolution before we record /
+        # forward. Mirror the openai_passthrough behavior.
+        for _ in range(_HISTORY_GREP_MAX_INNER_TURNS):
+            _, patterns = self._extract_text_history_grep(msg.content)
+            if not patterns:
+                break
+            grep_blocks = [self._history_grep(p) for p in patterns]
+            _trace(
+                "history_grep_resolved",
+                handler="car_bench",
+                patterns=patterns,
+                blocks=grep_blocks,
+            )
+            kwargs["messages"] = list(kwargs["messages"]) + [
+                {"role": "assistant", "content": msg.content or ""},
+                {"role": "system", "content": "\n\n".join(grep_blocks)},
+            ]
+            resp = await _chat_completions_with_retry(self.client, **kwargs)
+            msg = resp.choices[0].message
+
+        # ── strip our own markup from the outgoing content ─────────
+        # The model might have emitted notes or history-grep markers
+        # that we want stripped before forwarding to the green.
+        if msg.content:
+            cleaned = self._extract_text_notes(msg.content)
+            cleaned, _ = self._extract_text_history_grep(cleaned)
+            msg.content = cleaned
 
         # ── record assistant turn in history (full OpenAI shape) ────
         assistant_entry: dict[str, Any] = {
@@ -1296,11 +1418,16 @@ class Agent:
             # the freshest version every turn, including any notes the
             # model just wrote in the previous step).
             notes_msg = self._notes_system_message()
-            messages = (
-                [self.history[0], notes_msg] + self.history[1:]
-                if notes_msg and self.history
-                else self.history
-            )
+            history_msg = self._history_system_message()
+            # Notes always inject; history reminder only when context
+            # has grown past the threshold (returns None below it).
+            prefix: list[dict[str, Any]] = [notes_msg]
+            if history_msg is not None:
+                prefix.append(history_msg)
+            if self.history:
+                messages = [self.history[0]] + prefix + self.history[1:]
+            else:
+                messages = prefix
             kwargs: dict[str, Any] = {
                 "model": model_name(),
                 "messages": messages,

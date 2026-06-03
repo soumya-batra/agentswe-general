@@ -170,16 +170,13 @@ NOTE = {
         "name": "note",
         "description": (
             "Add, remove, or list short entries in your working memory. "
-            "Working memory persists across turns and is injected at the "
-            "TOP of every turn under '# Working notes'. Use it for short "
-            "one-line entries you will reference LATER — constraints, "
-            "findings, decisions, plans, blockers, completed steps.\n\n"
+            "Working memory persists across turns and is shown at the "
+            "top of each turn under '# Working notes'. Useful for one-"
+            "line entries you might want to recall later — constraints, "
+            "findings, decisions, plans, blockers, completed steps. "
             "Suggested prefixes inside the text: [CONSTRAINT: ...], "
             "[FINDING: ...], [DECISION: ...], [PLAN: ...], "
-            "[BLOCKED-ON: ...], [DONE: ...]. Use whichever fits.\n\n"
-            "BEFORE each tool call or final answer, scan your notes; do "
-            "not contradict a CONSTRAINT, repeat a DONE step, or "
-            "re-discover a FINDING. Keep notes SHORT (one line)."
+            "[BLOCKED-ON: ...], [DONE: ...]."
         ),
         "parameters": {
             "type": "object",
